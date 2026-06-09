@@ -188,9 +188,11 @@ def load_config(
     config_file: str | None = None,
     *,
     app_mode: str | None = None,
-    local_config_file: str | None = "config.local.yml",
+    local_config_file: str | None = None,
 ) -> Settings:
     config_file = config_file or "config.yml"
+    if local_config_file is None:
+        local_config_file = os.getenv("APP_LOCAL_CONFIG", "config.local.yml")
 
     config_data = _load_yaml_file(config_file)
     if local_config_file:

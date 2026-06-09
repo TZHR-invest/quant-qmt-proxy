@@ -57,6 +57,9 @@ logs/
 .env.*.local
 config.local.yml
 config.test.local.yml
+config.local.*.yml
+start-prod-*.bat
+stop-all.bat
 
 # QMT related
 # Local xtquant/QMT drop-ins
