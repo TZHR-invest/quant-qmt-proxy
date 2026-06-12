@@ -60,6 +60,7 @@ config.test.local.yml
 config.local.*.yml
 start-prod-*.bat
 stop-all.bat
+stop-all.*
 
 # QMT related
 # Local xtquant/QMT drop-ins

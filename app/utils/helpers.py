@@ -82,6 +82,23 @@ def validate_stock_code(stock_code: str) -> bool:
         return True
 
 
+def normalize_stock_code(stock_code: str) -> str:
+    """标准化股票代码，为不带市场后缀的纯数字代码补全后缀"""
+    code = stock_code.strip().upper()
+    if '.' in code:
+        return code
+    if not code.isdigit():
+        return code
+    prefix = code[0]
+    if prefix == '6' or prefix == '5' or prefix == '9':
+        return f"{code}.SH"
+    elif prefix == '0' or prefix == '2' or prefix == '3':
+        return f"{code}.SZ"
+    elif prefix == '4' or prefix == '8':
+        return f"{code}.BJ"
+    return code
+
+
 def validate_date_range(start_date: str, end_date: str) -> bool:
     """验证日期范围"""
     try:

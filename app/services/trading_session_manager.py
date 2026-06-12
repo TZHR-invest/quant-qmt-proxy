@@ -12,7 +12,7 @@ from app.services.contracts import CancelStockOrderCommand, OpenSessionCommand, 
 from app.services.trading_event_hub import TradingEventHub
 from app.services.xttrader_gateway import XTQUANT_TRADER_AVAILABLE, XTTraderGateway
 from app.utils.exceptions import TradingServiceException
-from app.utils.helpers import validate_stock_code
+from app.utils.helpers import normalize_stock_code, validate_stock_code
 from app.utils.logger import logger
 
 
@@ -216,8 +216,9 @@ class TradingSessionManager:
         if not session.gateway:
             raise TradingServiceException("session is not connected to xttrader", "TRADER_NOT_CONNECTED")
 
+        normalized_code = normalize_stock_code(command.stock_code)
         order_id = session.gateway.order_stock(
-            stock_code=command.stock_code,
+            stock_code=normalized_code,
             order_type=command.side,
             order_volume=command.volume,
             price_type=command.price_type,
