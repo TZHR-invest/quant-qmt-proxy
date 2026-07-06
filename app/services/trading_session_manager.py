@@ -593,14 +593,26 @@ class TradingSessionManager:
             self._publish_event(session_id, "position_update", self._convert_position(payload))
             return
         if event_type == "order_error":
+            error_id = int(getattr(payload, "error_id", 0) or 0)
+            error_msg = str(getattr(payload, "error_msg", ""))
+            order_id = str(getattr(payload, "order_id", ""))
+
+            # 将错误信息回填到对应的订单记录中
+            with self._lock:
+                if session.accept_events and order_id in session.orders:
+                    order = session.orders[order_id]
+                    if order.get("order_status_code", 0) not in (54, 56):
+                        order["order_status_code"] = 57
+                        order["status_msg"] = error_msg or f"error_id={error_id}"
+
             self._publish_event(
                 session_id,
                 "order_error",
                 {
                     "account_id": str(getattr(payload, "account_id", "")),
-                    "order_id": str(getattr(payload, "order_id", "")),
-                    "error_id": int(getattr(payload, "error_id", 0) or 0),
-                    "error_msg": str(getattr(payload, "error_msg", "")),
+                    "order_id": order_id,
+                    "error_id": error_id,
+                    "error_msg": error_msg,
                     "strategy_name": str(getattr(payload, "strategy_name", "")),
                     "order_remark": str(getattr(payload, "order_remark", "")),
                 },

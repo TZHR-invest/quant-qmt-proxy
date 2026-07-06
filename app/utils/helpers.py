@@ -89,6 +89,10 @@ def normalize_stock_code(stock_code: str) -> str:
         return code
     if not code.isdigit():
         return code
+    prefix2 = code[:2]
+    if prefix2 == '92':
+        # 920xxx 是北交所股票代码段（新一批北交所上市股票）
+        return f"{code}.BJ"
     prefix = code[0]
     if prefix == '6' or prefix == '5' or prefix == '9':
         return f"{code}.SH"
