@@ -47,12 +47,19 @@ class TradingSessionManager:
         "1": 1,
     }
 
+    # 建会话失败熔断参数：QMT 交易通道不可用时，连续失败 N 次后冷却 T 秒，
+    # 冷却期内直接拒绝（不创建 XtQuantTrader 实例），防止 SDK writer 资源耗尽。
+    BREAKER_FAILURE_THRESHOLD = 3
+    BREAKER_COOLDOWN_SECONDS = 60
+
     def __init__(self, settings: Settings, event_hub: TradingEventHub | None = None):
         self.settings = settings
         self.event_hub = event_hub or TradingEventHub()
         self._lock = threading.RLock()
         self._sessions: dict[str, TradingSession] = {}
         self._mock_order_counter = 1000
+        # 熔断状态: {account_id: {"failures": int, "open_until": float(epoch)}
+        self._breaker: dict[str, dict[str, float | int]] = {}
 
     def open_session(self, command: OpenSessionCommand) -> dict[str, Any]:
         session_id = f"session_{command.account_id}_{uuid.uuid4().hex[:10]}"
@@ -66,6 +73,7 @@ class TradingSessionManager:
             profile = self._resolve_account_profile(command.account_id, command.account_type)
             account_profile_name = profile.name
             account_kind = profile.account_kind.value
+            self._check_breaker(command.account_id)
 
         session = TradingSession(
             session_id=session_id,
@@ -87,7 +95,13 @@ class TradingSessionManager:
                 with self._lock:
                     session.gateway = gateway
             session.asset = self._query_asset(session)
-        except Exception:
+        except Exception as exc:
+            # 仅连接类失败计入熔断（账号配置类错误不影响）
+            if is_real and isinstance(exc, TradingServiceException) and exc.error_code in {
+                "XTTRADER_UNAVAILABLE",
+                "TRADER_NOT_CONNECTED",
+            }:
+                self._record_connect_failure(command.account_id)
             with self._lock:
                 existing = self._sessions.pop(session_id, None)
                 if existing:
@@ -103,6 +117,8 @@ class TradingSessionManager:
                         f"failed to cleanup gateway after session open error: session_id={session_id}, error={exc}"
                     )
             raise
+        if is_real:
+            self._record_connect_success(command.account_id)
         logger.info(
             f"opened trading session: session_id={session_id}, account_id={session.account_id}, account_type={session.account_type}, mode={session.mode}, account_kind={session.account_kind}, orders_enabled={session.orders_enabled}"
         )
@@ -341,6 +357,40 @@ class TradingSessionManager:
         except RuntimeError as exc:
             raise TradingServiceException(str(exc), "XTTRADER_UNAVAILABLE") from exc
         return gateway
+
+    def _check_breaker(self, account_id: str) -> None:
+        """熔断打开期间快速拒绝建会话，不创建 XtQuantTrader 实例。"""
+        with self._lock:
+            state = self._breaker.get(account_id)
+            if not state:
+                return
+            open_until = float(state.get("open_until", 0.0))
+            now = time.time()
+            if open_until > now:
+                raise TradingServiceException(
+                    f"trading channel unavailable; cooling down for {int(open_until - now)}s",
+                    "XTTRADER_UNAVAILABLE",
+                )
+            # 冷却期已过（此前打开过熔断），清除状态；计数中（open_until=0）不清理
+            if open_until > 0:
+                self._breaker.pop(account_id, None)
+
+    def _record_connect_failure(self, account_id: str) -> None:
+        """记录一次连接失败；连续失败达到阈值后打开熔断。"""
+        with self._lock:
+            state = self._breaker.setdefault(account_id, {"failures": 0, "open_until": 0.0})
+            state["failures"] = int(state.get("failures", 0)) + 1
+            if state["failures"] >= self.BREAKER_FAILURE_THRESHOLD:
+                state["open_until"] = time.time() + self.BREAKER_COOLDOWN_SECONDS
+                logger.warning(
+                    f"circuit breaker opened for account {account_id}: "
+                    f"{state['failures']} consecutive failures, cooling down {self.BREAKER_COOLDOWN_SECONDS}s"
+                )
+
+    def _record_connect_success(self, account_id: str) -> None:
+        """建会话成功，清除熔断状态。"""
+        with self._lock:
+            self._breaker.pop(account_id, None)
 
     def _resolve_account_profile(self, account_id: str, account_type: str) -> XTQuantTradingAccountConfig:
         normalized_account_type = self._normalize_account_type(account_type)

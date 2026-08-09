@@ -492,3 +492,119 @@ def test_to_epoch_ms_handles_unknown_real_order_time_values_without_crashing():
     assert manager._to_epoch_ms(1714123456789) == 1714123456789
     assert manager._to_epoch_ms("99999999999999") == 0
     assert manager._to_epoch_ms("not-a-time") == 0
+
+
+class SwitchGateway(FakeGateway):
+    """可切换失败/成功的 gateway；记录实例创建次数。"""
+
+    fail = False
+    created = 0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        SwitchGateway.created += 1
+
+    def connect(self):
+        if SwitchGateway.fail:
+            raise RuntimeError("xttrader.connect() returned -1")
+        self.connected = True
+
+
+def test_circuit_breaker_opens_after_consecutive_connect_failures(monkeypatch):
+    monkeypatch.setattr(manager_module, "XTTraderGateway", SwitchGateway)
+    monkeypatch.setattr(manager_module, "XTQUANT_TRADER_AVAILABLE", True)
+    SwitchGateway.fail = True
+    SwitchGateway.created = 0
+
+    manager = TradingSessionManager(build_settings("dev", accounts=[simulated_account()]), TradingEventHub())
+
+    # 前 3 次失败：每次都创建 gateway 实例
+    for _ in range(3):
+        with pytest.raises(TradingServiceException) as exc:
+            manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+        assert exc.value.error_code == "XTTRADER_UNAVAILABLE"
+    assert SwitchGateway.created == 3
+
+    # 第 4 次：熔断打开，直接拒绝且不再创建 gateway
+    with pytest.raises(TradingServiceException) as exc:
+        manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert exc.value.error_code == "XTTRADER_UNAVAILABLE"
+    assert "cooling down" in exc.value.message
+    assert SwitchGateway.created == 3
+
+    # 熔断期间持续快速拒绝
+    for _ in range(3):
+        with pytest.raises(TradingServiceException):
+            manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert SwitchGateway.created == 3
+
+
+def test_circuit_breaker_recovers_after_cooldown(monkeypatch):
+    monkeypatch.setattr(manager_module, "XTTraderGateway", SwitchGateway)
+    monkeypatch.setattr(manager_module, "XTQUANT_TRADER_AVAILABLE", True)
+    monkeypatch.setattr(manager_module.TradingSessionManager, "BREAKER_COOLDOWN_SECONDS", 0.2)
+    SwitchGateway.fail = True
+    SwitchGateway.created = 0
+
+    manager = TradingSessionManager(build_settings("dev", accounts=[simulated_account()]), TradingEventHub())
+
+    for _ in range(3):
+        with pytest.raises(TradingServiceException):
+            manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+
+    # 冷却期内仍被拒绝
+    with pytest.raises(TradingServiceException):
+        manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert SwitchGateway.created == 3
+
+    # 冷却期过后，通道恢复则建会话成功
+    time.sleep(0.3)
+    SwitchGateway.fail = False
+    session = manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert session["is_real"] is True
+    assert SwitchGateway.created == 4
+
+
+def test_circuit_breaker_resets_on_success(monkeypatch):
+    monkeypatch.setattr(manager_module, "XTTraderGateway", SwitchGateway)
+    monkeypatch.setattr(manager_module, "XTQUANT_TRADER_AVAILABLE", True)
+    SwitchGateway.fail = True
+    SwitchGateway.created = 0
+
+    manager = TradingSessionManager(build_settings("dev", accounts=[simulated_account()]), TradingEventHub())
+
+    # 失败 2 次（未达阈值）
+    for _ in range(2):
+        with pytest.raises(TradingServiceException):
+            manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+
+    # 成功 1 次 → 计数重置
+    SwitchGateway.fail = False
+    manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    SwitchGateway.fail = True
+
+    # 再失败 1 次：计数已重置，不触发熔断（gateway 仍被创建）
+    with pytest.raises(TradingServiceException):
+        manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert SwitchGateway.created == 4
+
+
+def test_circuit_breaker_ignores_non_connection_errors(monkeypatch):
+    monkeypatch.setattr(manager_module, "XTTraderGateway", SwitchGateway)
+    monkeypatch.setattr(manager_module, "XTQUANT_TRADER_AVAILABLE", True)
+    SwitchGateway.fail = True
+    SwitchGateway.created = 0
+
+    manager = TradingSessionManager(build_settings("dev", accounts=[simulated_account()]), TradingEventHub())
+
+    # 未注册账号的配置错误（ACCOUNT_PROFILE_NOT_ALLOWED）不计入熔断
+    for _ in range(5):
+        with pytest.raises(TradingServiceException) as exc:
+            manager.open_session(OpenSessionCommand(account_id="UNKNOWN-001"))
+        assert exc.value.error_code == "ACCOUNT_PROFILE_NOT_ALLOWED"
+    assert SwitchGateway.created == 0
+
+    # 注册账号的连接失败计数不受影响（从未被配置错误污染）
+    with pytest.raises(TradingServiceException):
+        manager.open_session(OpenSessionCommand(account_id="SIM-001"))
+    assert SwitchGateway.created == 1
