@@ -58,6 +58,32 @@ Key env overrides: `APP_MODE`, `APP_SERVERS`, `APP_HOST`, `APP_PORT`, `QMT_USERD
 | dev | real xtquant, simulated account | allowed |
 | prod | real xtquant, real account | requires `enable_prod_orders: true` |
 
+## Production operations (this machine)
+
+**Proxy services are NSSM Windows services** — do NOT start them by running
+`start-prod-*.bat` or `sc start` directly (they conflict with nssm and can
+start before QMT is logged in).
+
+- `QMTProxy-020` (REST 8001 / gRPC 50051, account 020100053835, G:\qmt)
+- `QMTProxy-666` (REST 8002 / gRPC 50052, account 666810082889, G:\qmt1)
+
+Restart (admin PowerShell; waits for both MiniQMT trading channels first):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\restart-proxy.ps1 -WaitMinutes 3
+```
+
+Scheduled tasks (created at logon, SYSTEM/Interactive):
+
+- `QMT-AutoLogin` (+30s, wbaif): clicks the MiniQMT login buttons via `scripts\qmt_auto_login.ps1` (credentials/captcha are pre-filled; skips already-logged-in windows).
+- `QMT-Proxy-AutoStart` (+60s, SYSTEM): runs `restart-proxy.ps1 -WaitMinutes 15`, waits for QMT readiness (max 15 min) then starts both services.
+
+Boot flow: QMT auto-starts via HKCU Run → QMT-AutoLogin clicks login → QMT-Proxy-AutoStart starts proxy services. MiniQMT has **no auto-login option**; it relies on the click script. After changing the trading password, log in manually once to refresh saved credentials.
+
+Self-healing: nssm restarts a crashed proxy process after 5s. Circuit breaker in `trading_session_manager.py` (3 consecutive connect failures → 60s cooldown) prevents xtquant SDK writer exhaustion when QMT is down. QMT itself is **not** auto-restarted if it crashes mid-day — restart it manually and re-run `scripts\qmt_auto_login.ps1`.
+
+Probe script: `python scripts\qmt_ready_check.py <userdata_path> <account_id>` exits 0 when the trading channel is ready.
+
 ## Key gotchas
 
 - **Python 3.10–3.13 required** (not 3.7, not 3.9).
@@ -66,3 +92,4 @@ Key env overrides: `APP_MODE`, `APP_SERVERS`, `APP_HOST`, `APP_PORT`, `QMT_USERD
 - Before dev/prod, create `config.local.yml` with `qmt_userdata_path` (MiniQMT: `userdata_mini`, QMT: `userdata`) and registered accounts.
 - `enable_prod_orders: false` by default; prod sessions will reject orders.
 - `trading_models.py` enums exist but actual order/cancel in `routers/trading.py` uses raw xtconstant ints (23/24).
+- **Never** run `start-prod-*.bat` / `stop-all.bat` / `sc start QMTProxy-*` manually — use `scripts\restart-proxy.ps1` (admin) instead.
