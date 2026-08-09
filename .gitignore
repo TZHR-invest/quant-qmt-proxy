@@ -94,3 +94,9 @@ Thumbs.db
 .DS_Store
 
 diff.txt
+
+# OpenCode work dir
+.omo/
+
+# Crash dumps
+*.dmp
