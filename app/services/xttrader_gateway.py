@@ -21,21 +21,27 @@ except ImportError:
 
 
 import hashlib
+import threading
 
 # --- down_queue 防复发: 固定 session 池 (2026-08-29) ---
 # 背景: 每次 uuid 随机 session 都会让 QMT 在 userdata_mini 生成 lock_down_queue_win_<session>
 #       且 2.1.19.1 不再自动清理, 导致每天数百个垃圾文件堆积。
 # 方案: 按 account_id 确定性派生固定 session, 轮询复用, 不再产生新 lock 文件。
-#       池大小 6 = 全量日志实测单端口每秒并发峰值 5 (020: 08-08/08-27/08-28; 666: 08-25) + 1 余量。
-_SESSION_POOL_SIZE = 6
+#       池大小 8 = 全量日志实测单端口并发连接峰值 5 (020: 08-08/08-27/08-28; 666: 08-25)
+#       + 3 缓冲 (覆盖新增下游客户端/重启风暴), 每账号最多 8 个固定 lock 文件。
+# 线程安全: proxy 为 uvicorn 多线程服务, 并发 POST /sessions 会同时进入本函数,
+#           计数器读-改-写必须加锁, 否则并发线程可能拿到相同 slot 导致 session 冲突。
+_SESSION_POOL_SIZE = 8
 _session_pool_counter = 0
+_session_pool_lock = threading.Lock()
 
 def _next_fixed_session(account_id: str) -> int:
     global _session_pool_counter
     digest = int(hashlib.md5(account_id.encode()).hexdigest()[:8], 16)
     base = (digest % 1_900_000_000) + 1
-    slot = _session_pool_counter % _SESSION_POOL_SIZE
-    _session_pool_counter += 1
+    with _session_pool_lock:
+        slot = _session_pool_counter % _SESSION_POOL_SIZE
+        _session_pool_counter += 1
     return base + slot
 
 ACCOUNT_TYPE_MAP = {
