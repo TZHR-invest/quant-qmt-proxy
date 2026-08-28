@@ -19,6 +19,25 @@ except ImportError:
     XTQUANT_TRADER_AVAILABLE = False
 
 
+
+import hashlib
+
+# --- down_queue 防复发: 固定 session 池 (2026-08-29) ---
+# 背景: 每次 uuid 随机 session 都会让 QMT 在 userdata_mini 生成 lock_down_queue_win_<session>
+#       且 2.1.19.1 不再自动清理, 导致每天数百个垃圾文件堆积。
+# 方案: 按 account_id 确定性派生 4 个固定 session, 轮询复用, 不再产生新 lock 文件。
+#       池大小 4 = 实测单端口并发峰值 3 + 1 余量。
+_SESSION_POOL_SIZE = 4
+_session_pool_counter = 0
+
+def _next_fixed_session(account_id: str) -> int:
+    global _session_pool_counter
+    digest = int(hashlib.md5(account_id.encode()).hexdigest()[:8], 16)
+    base = (digest % 1_900_000_000) + 1
+    slot = _session_pool_counter % _SESSION_POOL_SIZE
+    _session_pool_counter += 1
+    return base + slot
+
 ACCOUNT_TYPE_MAP = {
     "SECURITY": "STOCK",
     "STOCK": "STOCK",
@@ -91,7 +110,7 @@ class XTTraderGateway:
         self.qmt_userdata_path = qmt_userdata_path
         self.account_id = account_id
         self.account_type = normalized_account_type
-        self.session = (uuid.uuid4().int % 2_000_000_000) + 1
+        self.session = _next_fixed_session(account_id)
         self.callback = TraderCallbackBridge(event_handler=event_handler)
         self.trader: XtQuantTrader | None = None
         self.account: StockAccount | None = None
