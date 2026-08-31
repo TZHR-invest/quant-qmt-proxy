@@ -30,7 +30,7 @@ def main() -> int:
     timeout = float(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_TIMEOUT
 
     callback = XtQuantTraderCallback()
-    session = 876543210  # 固定 session: down_queue 防复发 (2026-08-29), 避免每次随机 session 产生 lock_down_queue_win_* 垃圾文件
+    session = (uuid.uuid4().int % 2_000_000_000) + 1  # 2026-08-31: 随机 session, 固定 session 反复 connect 导致 QMT 2.1.19.1 残留卡死
     trader = XtQuantTrader(qmt_path, session, callback)
     trader.register_callback(callback)
     trader.start()
