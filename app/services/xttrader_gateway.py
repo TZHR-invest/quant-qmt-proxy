@@ -20,29 +20,15 @@ except ImportError:
 
 
 
-import hashlib
-import threading
+import uuid
 
-# --- down_queue 防复发: 固定 session 池 (2026-08-29) ---
-# 背景: 每次 uuid 随机 session 都会让 QMT 在 userdata_mini 生成 lock_down_queue_win_<session>
-#       且 2.1.19.1 不再自动清理, 导致每天数百个垃圾文件堆积。
-# 方案: 按 account_id 确定性派生固定 session, 轮询复用, 不再产生新 lock 文件。
-#       池大小 8 = 全量日志实测单端口并发连接峰值 5 (020: 08-08/08-27/08-28; 666: 08-25)
-#       + 3 缓冲 (覆盖新增下游客户端/重启风暴), 每账号最多 8 个固定 lock 文件。
-# 线程安全: proxy 为 uvicorn 多线程服务, 并发 POST /sessions 会同时进入本函数,
-#           计数器读-改-写必须加锁, 否则并发线程可能拿到相同 slot 导致 session 冲突。
-_SESSION_POOL_SIZE = 8
-_session_pool_counter = 0
-_session_pool_lock = threading.Lock()
+# --- 2026-08-31 回退: 固定 session 池导致 QMT 2.1.19.1 session 残留卡死 ---
+# 固定 session 反复 connect/disconnect 后, QMT 客户端内部状态残留, 后续握手超时 (connect -1)。
+# 实测: 固定池 session (6764649xx) connect=-1, 随机 session connect=0 秒连。
+# 恢复 8/28 前的随机 session; down_queue 由 qmt-downqueue-clean.sh 每周清理。
 
 def _next_fixed_session(account_id: str) -> int:
-    global _session_pool_counter
-    digest = int(hashlib.md5(account_id.encode()).hexdigest()[:8], 16)
-    base = (digest % 1_900_000_000) + 1
-    with _session_pool_lock:
-        slot = _session_pool_counter % _SESSION_POOL_SIZE
-        _session_pool_counter += 1
-    return base + slot
+    return (uuid.uuid4().int % 2_000_000_000) + 1
 
 ACCOUNT_TYPE_MAP = {
     "SECURITY": "STOCK",
@@ -126,6 +112,12 @@ class XTTraderGateway:
         self.trader = XtQuantTrader(self.qmt_userdata_path, self.session, self.callback)
         self.trader.register_callback(self.callback)
         self.trader.start()
+        # 2026-08-31 事故: 高负载下 QMT 客户端握手 >3s, 默认超时导致 connect -1。
+        # 调大到 10s, 给握手足够时间 (2.1.19.1 新建连接握手排队/优先级低)。
+        try:
+            self.trader.set_timeout(10)
+        except Exception:
+            pass
         logger.info(
             f"xttrader connecting: account_id={self.account_id}, account_type={self.account_type}, session={self.session}"
         )
