@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 
 from app.config import Settings, get_settings
+from app.dependencies import get_trading_session_manager
 from app.utils.helpers import format_response
 
 router = APIRouter(prefix="/health", tags=["健康检查"])
@@ -27,12 +28,25 @@ async def health_check(settings: Settings = Depends(get_settings)):
 
 
 @router.get("/ready")
-async def readiness_check():
-    """就绪检查接口。"""
+async def readiness_check(
+    manager=Depends(get_trading_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """就绪检查：报告真实后端状态，而不是恒 ready。
 
+    D3 (2026-09-15): 以前无条件返回 ready，桥/连接死了在健康接口上完全看不见。
+    没有会话时返回 idle —— 进程活着但还没有交易通道，不该谎报 ready。
+    """
+
+    data = manager.readiness()
+    # D6 (2026-09-15): `backend` used to carry xtquant.mode (prod/dev), which
+    # says nothing about WHICH trader is wired up -- a silent fall back to
+    # miniQMT looked identical to the intended bridge.  readiness() now owns
+    # `backend` (bridge/mini/none); the licence mode keeps its own key.
+    data["xtquant_mode"] = settings.xtquant.mode.value
     return format_response(
-        data={"status": "ready"},
-        message="服务已就绪",
+        data=data,
+        message="服务已就绪" if data["status"] == "ready" else f"交易通道未就绪（{data['status']}）",
     )
 
 

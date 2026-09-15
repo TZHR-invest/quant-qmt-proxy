@@ -45,8 +45,13 @@ ACCOUNT_TYPE_MAP = {
 
 
 class TraderCallbackBridge(XtQuantTraderCallback):
-    def __init__(self, event_handler: Callable[[str, Any], None] | None = None):
+    def __init__(
+        self,
+        event_handler: Callable[[str, Any], None] | None = None,
+        on_disconnect: Callable[[], None] | None = None,
+    ):
         self._event_handler = event_handler
+        self._on_disconnect = on_disconnect
 
     def _emit(self, event_type: str, payload: Any) -> None:
         if self._event_handler is not None:
@@ -57,6 +62,15 @@ class TraderCallbackBridge(XtQuantTraderCallback):
 
     def on_disconnected(self):
         logger.warning("xttrader 连接断开")
+        # D2 (2026-09-15): this used to only log.  Nothing ever flipped
+        # `connected` back to False, so after the underlying link died REST kept
+        # answering 200 with all-zero data instead of failing -- the "200 + all
+        # zeros" incident.  The callback now marks the gateway disconnected.
+        if self._on_disconnect is not None:
+            try:
+                self._on_disconnect()
+            except Exception as exc:  # never raise back into xtquant's thread
+                logger.error(f"on_disconnected hook failed: {exc}")
 
     def on_account_status(self, status):
         self._emit("account_status", status)
@@ -103,9 +117,36 @@ class XTTraderGateway:
         self.account_id = account_id
         self.account_type = normalized_account_type
         self.session = _next_fixed_session(account_id)
-        self.callback = TraderCallbackBridge(event_handler=event_handler)
+        self.callback = TraderCallbackBridge(
+            event_handler=event_handler,
+            on_disconnect=self._mark_disconnected,
+        )
         self.trader: XtQuantTrader | None = None
         self.account: StockAccount | None = None
+        self.connected = False
+
+    @property
+    def backend(self) -> str:
+        """D6 (2026-09-15): name the trader implementation actually loaded.
+
+        `xtquant.mode` says prod/dev -- that is a licence/environment flag and
+        says nothing about which trader object got wired up.  miniQMT runs the
+        classic in-process xttrader; the big-QMT route swaps in the
+        xtquant_big_convert shim (module bigqmt_signal_trader.*) that talks to
+        the full client over RPC.  Health must report the latter as "bridge"
+        so a silent fallback cannot hide.
+        """
+        if self.trader is None:
+            return "none"
+        module = (type(self.trader).__module__ or "").lower()
+        return "bridge" if "bigqmt" in module else "mini"
+
+    def _mark_disconnected(self) -> None:
+        """D2: invoked from xtquant's callback thread when the link drops."""
+        if self.connected:
+            logger.warning(
+                f"xttrader 标记为未连接: account_id={self.account_id}, session={self.session}"
+            )
         self.connected = False
 
     def connect(self) -> None:

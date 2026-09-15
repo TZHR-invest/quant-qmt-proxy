@@ -16,6 +16,28 @@ from app.utils.helpers import normalize_stock_code, validate_stock_code
 from app.utils.logger import logger
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    """D5 (2026-09-15): never let a payload type take down the request.
+
+    miniQMT hands xttrader plain ints; the big-QMT RPC shim hands strings for
+    some fields -- account_type arrives as "STOCK".  int("STOCK") used to raise
+    ValueError inside a callback thread (swallowed by xtquant, event lost) and
+    inside the HTTP handler (bare 500).  Coerce, never raise.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    """D5: float twin of _as_int (the shim may deliver numeric strings)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class TradingSession:
     session_id: str
@@ -233,15 +255,63 @@ class TradingSessionManager:
             raise TradingServiceException("session is not connected to xttrader", "TRADER_NOT_CONNECTED")
 
         normalized_code = normalize_stock_code(command.stock_code)
-        order_id = session.gateway.order_stock(
-            stock_code=normalized_code,
-            order_type=command.side,
-            order_volume=command.volume,
-            price_type=command.price_type,
-            price=float(command.price or 0.0),
-            strategy_name=command.strategy_name,
-            order_remark=command.order_remark,
-        )
+        # D4 (2026-09-15): D1 only covered xttrader answering with a NEGATIVE
+        # id.  The bridge does not answer at all -- it RAISES (e.g.
+        # ValueError("rpc method is not allowed: order_stock") while the RPC
+        # allow-list is off), and that escaped as HTTP 500 with an empty body.
+        # A refusal must reach the caller as a refusal; a dead backend as 503.
+        try:
+            order_id = session.gateway.order_stock(
+                stock_code=normalized_code,
+                order_type=command.side,
+                order_volume=command.volume,
+                price_type=command.price_type,
+                price=float(command.price or 0.0),
+                strategy_name=command.strategy_name,
+                order_remark=command.order_remark,
+            )
+        except TradingServiceException:
+            raise
+        except TimeoutError as exc:
+            logger.error(
+                f"order timed out in xttrader: session_id={command.session_id}, "
+                f"account_id={session.account_id}, stock_code={command.stock_code}, "
+                f"volume={command.volume}, error={exc}"
+            )
+            raise TradingServiceException(
+                f"xttrader did not answer the order (timeout): {exc}",
+                "TRADER_NOT_CONNECTED",
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                f"order refused by xttrader: session_id={command.session_id}, "
+                f"account_id={session.account_id}, stock_code={command.stock_code}, "
+                f"volume={command.volume}, price={command.price}, "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            raise TradingServiceException(
+                f"xttrader refused the order ({type(exc).__name__}): {exc}",
+                "ORDER_REJECTED",
+            ) from exc
+        # D1 (2026-09-15): xtquant reports a NEGATIVE order id to mean "rejected"
+        # (the bridge returns -1 for every order while rpc_allow_order_methods is
+        # off).  Serialising that as "-1 / submitted" made REST answer "order
+        # accepted" for orders that never reached the broker -- far more
+        # dangerous than an outright error.
+        try:
+            returned_id = int(order_id)
+        except (TypeError, ValueError):
+            returned_id = -1
+        if returned_id < 0:
+            logger.error(
+                f"order rejected by xttrader: session_id={command.session_id}, "
+                f"account_id={session.account_id}, stock_code={command.stock_code}, "
+                f"volume={command.volume}, returned={order_id!r}"
+            )
+            raise TradingServiceException(
+                f"xttrader rejected the order (returned {order_id!r})",
+                "ORDER_REJECTED",
+            )
         order = {
             "account_id": session.account_id,
             "stock_code": command.stock_code,
@@ -299,16 +369,36 @@ class TradingSessionManager:
         if not session.gateway:
             raise TradingServiceException("session is not connected to xttrader", "TRADER_NOT_CONNECTED")
 
-        if command.order_id:
-            result = session.gateway.cancel_order_stock(int(command.order_id))
-        else:
-            if not command.market or not command.order_sysid:
-                raise TradingServiceException(
-                    "market and order_sysid are required when cancelling by sysid",
-                    "CANCEL_TARGET_REQUIRED",
-                )
-            normalized_market = self._normalize_cancel_market(command.market)
-            result = session.gateway.cancel_order_stock_sysid(normalized_market, command.order_sysid)
+        # D4 (2026-09-15): same story as order_stock -- a raising bridge must
+        # not surface as a bare 500.
+        try:
+            if command.order_id:
+                result = session.gateway.cancel_order_stock(_as_int(command.order_id))
+            else:
+                if not command.market or not command.order_sysid:
+                    raise TradingServiceException(
+                        "market and order_sysid are required when cancelling by sysid",
+                        "CANCEL_TARGET_REQUIRED",
+                    )
+                normalized_market = self._normalize_cancel_market(command.market)
+                result = session.gateway.cancel_order_stock_sysid(normalized_market, command.order_sysid)
+        except TradingServiceException:
+            raise
+        except TimeoutError as exc:
+            raise TradingServiceException(
+                f"xttrader did not answer the cancel (timeout): {exc}",
+                "TRADER_NOT_CONNECTED",
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                f"cancel refused by xttrader: session_id={command.session_id}, "
+                f"account_id={session.account_id}, order_id={command.order_id}, "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            raise TradingServiceException(
+                f"xttrader refused the cancel ({type(exc).__name__}): {exc}",
+                "CANCEL_REJECTED",
+            ) from exc
 
         success = result == 0
         if success and command.order_id:
@@ -340,6 +430,32 @@ class TradingSessionManager:
         for session_id in session_ids:
             self.close_session(session_id)
 
+    def readiness(self) -> dict[str, Any]:
+        """D3 (2026-09-15): /health/ready used to be a constant "ready", so a dead
+        backend was invisible on the health endpoint.  Report what is actually
+        open and connected; with no real session the honest answer is "idle",
+        not "ready"."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        real = [s for s in sessions if s.mode != XTQuantMode.MOCK.value]
+        connected = [s for s in real if getattr(s.gateway, "connected", False)]
+        # D6 (2026-09-15): which trader is actually wired up (bridge vs mini).
+        backends = sorted({getattr(s.gateway, "backend", "none") for s in real})
+        backend = backends[0] if len(backends) == 1 else ("mixed" if backends else "none")
+        if not real:
+            state = "idle"
+        elif len(connected) == len(real):
+            state = "ready"
+        else:
+            state = "degraded"
+        return {
+            "status": state,
+            "sessions_total": len(sessions),
+            "sessions_real": len(real),
+            "sessions_connected": len(connected),
+            "backend": backend,
+        }
+
     def _connect_gateway(self, account_id: str, account_type: str, session_id: str) -> XTTraderGateway:
         if not XTQUANT_TRADER_AVAILABLE or not self.settings.xtquant.data.qmt_userdata_path:
             raise TradingServiceException(
@@ -356,6 +472,18 @@ class TradingSessionManager:
             gateway.connect()
         except RuntimeError as exc:
             raise TradingServiceException(str(exc), "XTTRADER_UNAVAILABLE") from exc
+        except TimeoutError as exc:
+            # C6 (2026-09-15): the bridge raises TimeoutError when the RPC never
+            # answers.  It used to escape as a bare HTTP 500; map it to 503 so a
+            # caller can tell "backend down" from "bad request".  TimeoutError is
+            # a subclass of OSError, so it must be caught first.
+            raise TradingServiceException(
+                f"xttrader connect timed out: {exc}", "TRADER_NOT_CONNECTED"
+            ) from exc
+        except OSError as exc:
+            raise TradingServiceException(
+                f"xttrader connect failed: {exc}", "XTTRADER_UNAVAILABLE"
+            ) from exc
         return gateway
 
     def _check_breaker(self, account_id: str) -> None:
@@ -530,13 +658,13 @@ class TradingSessionManager:
             "order_id": str(getattr(order, "order_id", "")),
             "order_sysid": str(getattr(order, "order_sysid", "")),
             "order_time_ms": self._to_epoch_ms(getattr(order, "order_time", None)),
-            "order_type": int(getattr(order, "order_type", 0) or 0),
-            "order_volume": int(getattr(order, "order_volume", 0) or 0),
-            "price_type": int(getattr(order, "price_type", 0) or 0),
-            "price": float(getattr(order, "price", 0.0) or 0.0),
-            "traded_volume": int(getattr(order, "traded_volume", 0) or 0),
-            "traded_price": float(getattr(order, "traded_price", 0.0) or 0.0),
-            "order_status_code": int(getattr(order, "order_status", 0) or 0),
+            "order_type": _as_int(getattr(order, "order_type", 0)),
+            "order_volume": _as_int(getattr(order, "order_volume", 0)),
+            "price_type": _as_int(getattr(order, "price_type", 0)),
+            "price": _as_float(getattr(order, "price", 0.0)),
+            "traded_volume": _as_int(getattr(order, "traded_volume", 0)),
+            "traded_price": _as_float(getattr(order, "traded_price", 0.0)),
+            "order_status_code": _as_int(getattr(order, "order_status", 0)),
             "status_msg": str(getattr(order, "status_msg", "")),
             "strategy_name": str(getattr(order, "strategy_name", "")),
             "order_remark": str(getattr(order, "order_remark", "")),
@@ -550,19 +678,19 @@ class TradingSessionManager:
             "account_id": str(getattr(trade, "account_id", "")),
             "stock_code": str(getattr(trade, "stock_code", "")),
             "instrument_name": str(getattr(trade, "instrument_name", "")),
-            "order_type": int(getattr(trade, "order_type", 0) or 0),
+            "order_type": _as_int(getattr(trade, "order_type", 0)),
             "traded_id": str(getattr(trade, "traded_id", "")),
             "traded_time_ms": self._to_epoch_ms(getattr(trade, "traded_time", None)),
-            "traded_price": float(getattr(trade, "traded_price", 0.0) or 0.0),
-            "traded_volume": int(getattr(trade, "traded_volume", 0) or 0),
-            "traded_amount": float(getattr(trade, "traded_amount", 0.0) or 0.0),
+            "traded_price": _as_float(getattr(trade, "traded_price", 0.0)),
+            "traded_volume": _as_int(getattr(trade, "traded_volume", 0)),
+            "traded_amount": _as_float(getattr(trade, "traded_amount", 0.0)),
             "order_id": str(getattr(trade, "order_id", "")),
             "order_sysid": str(getattr(trade, "order_sysid", "")),
             "strategy_name": str(getattr(trade, "strategy_name", "")),
             "order_remark": str(getattr(trade, "order_remark", "")),
             "direction": str(getattr(trade, "direction", "")),
             "offset_flag": str(getattr(trade, "offset_flag", "")),
-            "commission": float(getattr(trade, "commission", 0.0) or 0.0),
+            "commission": _as_float(getattr(trade, "commission", 0.0)),
             "secu_account": str(getattr(trade, "secu_account", "")),
         }
 
@@ -571,16 +699,16 @@ class TradingSessionManager:
             "account_id": str(getattr(position, "account_id", "")),
             "stock_code": str(getattr(position, "stock_code", "")),
             "instrument_name": str(getattr(position, "instrument_name", "")),
-            "volume": int(getattr(position, "volume", 0) or 0),
-            "can_use_volume": int(getattr(position, "can_use_volume", 0) or 0),
-            "frozen_volume": int(getattr(position, "frozen_volume", 0) or 0),
-            "on_road_volume": int(getattr(position, "on_road_volume", 0) or 0),
-            "yesterday_volume": int(getattr(position, "yesterday_volume", 0) or 0),
-            "open_price": float(getattr(position, "open_price", 0.0) or 0.0),
-            "avg_price": float(getattr(position, "avg_price", 0.0) or 0.0),
-            "last_price": float(getattr(position, "last_price", 0.0) or 0.0),
-            "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
-            "profit_rate": float(getattr(position, "profit_rate", 0.0) or 0.0),
+            "volume": _as_int(getattr(position, "volume", 0)),
+            "can_use_volume": _as_int(getattr(position, "can_use_volume", 0)),
+            "frozen_volume": _as_int(getattr(position, "frozen_volume", 0)),
+            "on_road_volume": _as_int(getattr(position, "on_road_volume", 0)),
+            "yesterday_volume": _as_int(getattr(position, "yesterday_volume", 0)),
+            "open_price": _as_float(getattr(position, "open_price", 0.0)),
+            "avg_price": _as_float(getattr(position, "avg_price", 0.0)),
+            "last_price": _as_float(getattr(position, "last_price", 0.0)),
+            "market_value": _as_float(getattr(position, "market_value", 0.0)),
+            "profit_rate": _as_float(getattr(position, "profit_rate", 0.0)),
             "direction": str(getattr(position, "direction", "")),
             "secu_account": str(getattr(position, "secu_account", "")),
         }
@@ -588,11 +716,11 @@ class TradingSessionManager:
     def _convert_asset(self, asset: Any, account_id: str) -> dict[str, Any]:
         return {
             "account_id": str(getattr(asset, "account_id", "") or account_id),
-            "cash": float(getattr(asset, "cash", 0.0) or 0.0),
-            "frozen_cash": float(getattr(asset, "frozen_cash", 0.0) or 0.0),
-            "market_value": float(getattr(asset, "market_value", 0.0) or 0.0),
-            "total_asset": float(getattr(asset, "total_asset", 0.0) or 0.0),
-            "fetch_balance": float(getattr(asset, "fetch_balance", 0.0) or 0.0),
+            "cash": _as_float(getattr(asset, "cash", 0.0)),
+            "frozen_cash": _as_float(getattr(asset, "frozen_cash", 0.0)),
+            "market_value": _as_float(getattr(asset, "market_value", 0.0)),
+            "total_asset": _as_float(getattr(asset, "total_asset", 0.0)),
+            "fetch_balance": _as_float(getattr(asset, "fetch_balance", 0.0)),
         }
 
     def _get_session_if_active(self, session_id: str) -> TradingSession | None:
@@ -611,8 +739,8 @@ class TradingSessionManager:
         if event_type == "account_status":
             event_payload = {
                 "account_id": str(getattr(payload, "account_id", "")),
-                "account_type": int(getattr(payload, "account_type", 0) or 0),
-                "status_code": int(getattr(payload, "status", 0) or 0),
+                "account_type": _as_int(getattr(payload, "account_type", 0)),
+                "status_code": _as_int(getattr(payload, "status", 0)),
             }
             self._publish_event(session_id, "account_status", event_payload)
             return
@@ -643,7 +771,7 @@ class TradingSessionManager:
             self._publish_event(session_id, "position_update", self._convert_position(payload))
             return
         if event_type == "order_error":
-            error_id = int(getattr(payload, "error_id", 0) or 0)
+            error_id = _as_int(getattr(payload, "error_id", 0))
             error_msg = str(getattr(payload, "error_msg", ""))
             order_id = str(getattr(payload, "order_id", ""))
 
@@ -676,7 +804,7 @@ class TradingSessionManager:
                     "account_id": str(getattr(payload, "account_id", "")),
                     "order_id": str(getattr(payload, "order_id", "")),
                     "order_sysid": str(getattr(payload, "order_sysid", "")),
-                    "error_id": int(getattr(payload, "error_id", 0) or 0),
+                    "error_id": _as_int(getattr(payload, "error_id", 0)),
                     "error_msg": str(getattr(payload, "error_msg", "")),
                 },
             )

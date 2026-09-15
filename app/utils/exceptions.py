@@ -78,6 +78,11 @@ def handle_xtquant_exception(exc: XTQuantException) -> HTTPException:
     elif isinstance(exc, TradingServiceException):
         if exc.error_code == "ORDERS_DISABLED":
             status_code = status.HTTP_403_FORBIDDEN
+        elif exc.error_code in {"ORDER_REJECTED", "CANCEL_REJECTED"}:
+            # D1/D4 (2026-09-15): xttrader answered with a negative order id, OR
+            # the gateway raised instead of answering (bridge allow-list off).
+            # 422 = the broker side said no; 503 = we could not reach it at all.
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         elif exc.error_code == "SESSION_NOT_FOUND":
             status_code = status.HTTP_404_NOT_FOUND
         elif exc.error_code == "ACCOUNT_PROFILE_NOT_ALLOWED":

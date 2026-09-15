@@ -110,6 +110,26 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content=format_response(message=str(exc), success=False, code=500))
 
 
+@app.exception_handler(TimeoutError)
+async def backend_timeout_handler(request: Request, exc: TimeoutError):
+    """C6 (2026-09-15): a backend (bridge RPC) timeout must surface as 503.
+
+    Before this the TimeoutError escaped the domain layer and the client saw an
+    unhandled HTTP 500, which is indistinguishable from a proxy bug.
+    """
+
+    logger.error(f"backend timeout: path={request.url.path}, error={exc}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "message": f"backend timeout: {exc}",
+                "error_code": "BACKEND_TIMEOUT",
+            }
+        },
+    )
+
+
 app.include_router(health.router)
 app.include_router(data.router)
 app.include_router(trading.router)

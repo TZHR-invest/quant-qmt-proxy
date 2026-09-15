@@ -82,6 +82,36 @@ Boot flow: QMT auto-starts via HKCU Run → QMT-AutoLogin clicks login → QMT-P
 
 Self-healing: nssm restarts a crashed proxy process after 5s. Circuit breaker in `trading_session_manager.py` (3 consecutive connect failures → 60s cooldown) prevents xtquant SDK writer exhaustion when QMT is down. QMT itself is **not** auto-restarted if it crashes mid-day — restart it manually and re-run `scripts\qmt_auto_login.ps1`.
 
+### Starting / restarting QMT (2026-09-14)
+
+On this broker build `XtItClient.exe` is a **lite-mode launcher**, not a resident client:
+it logs in, writes `bin.x64\linkMini`, kills any running `XtMiniQmt.exe` that is not its own
+child, spawns its own mini (already logged in), then exits normally.
+
+Use it as a launcher:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\qmt-start-via-bigqmt.ps1 `
+    -QmtDir "G:\qmt1" -Account "666810082889" -StopService "QMTProxy-666"
+```
+
+Verified 3x (~32 s, 2026-09-14): stops the proxy service, clears leftover launchers, starts
+the launcher, waits for the new mini and its auto-login, probes the **trading channel** with
+`qmt_ready_check.py`, then restarts the service. Exit code 0 = ready.
+
+**Never start `XtItClient.exe` while the instance is live** -- it kills the production mini
+(2026-09-14: 666 trading channel was down for 3 minutes).
+
+**After any QMT-client experiment**, always: `taskkill /F /IM XtItClient.exe` (leftover
+launchers never exit and then kill each other's mini, wedging the next start -- observed
+4 leftovers causing a 180 s timeout and a 5 min outage) and delete `bin.x64\linkQmt` /
+`linkMini` if present. Then verify the **trading channel**
+(`POST /api/v1/trading/sessions` returning 200), not just a quote probe.
+
+**NEVER use a `link*` wildcard when cleaning these up.** On Windows it also matches
+`LinkageTrade.dll` (1 MB, required by the full client) and deletes it silently; after that
+`XtItClient.exe` dies with "cannot find LinkageTrade.dll" and the login window never appears
+(measured 2026-09-14). Use the explicit names only.
 Probe script: `python scripts\qmt_ready_check.py <userdata_path> <account_id>` exits 0 when the trading channel is ready.
 
 ## Key gotchas
