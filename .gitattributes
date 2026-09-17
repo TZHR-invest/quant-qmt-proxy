@@ -1,0 +1,7 @@
+# 2026-09-17: 根治 CRLF 噪音（此前 93 个文件显示为 modified，实际只是行尾差异）
+* text=auto
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
+*.py  text eol=lf

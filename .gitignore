@@ -91,7 +91,6 @@ tmp/
 
 # OS
 Thumbs.db
-.DS_Store
 
 diff.txt
 
@@ -100,11 +99,8 @@ diff.txt
 
 # Crash dumps
 *.dmp
-*.dmp
-*.bak
 *.bak-*
-__pycache__/
 *.pyc
-logs/
 generated/
 staging/
+*.bak.*
