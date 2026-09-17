@@ -100,3 +100,11 @@ diff.txt
 
 # Crash dumps
 *.dmp
+*.dmp
+*.bak
+*.bak-*
+__pycache__/
+*.pyc
+logs/
+generated/
+staging/
