@@ -39,7 +39,9 @@
     * if the cancel does not take, a second attempt is made via order_sysid; if
       that also fails the script says so LOUDLY (a resting order at the floor is
       harmless but the operator must know it is there).
-    * production (8001/8002) is not touched -- default port is the 8003 replica.
+    * production (8001/8002) is not touched -- default port is the 8007 replica
+      (moved off 8003 on 2026-09-28: 8003 is now the third account's production
+      port, see the note next to the $Port default).
 
   USAGE
     qmt-cancel-path-test.ps1 -Rehearsal                  # gates + read-only evidence
@@ -84,7 +86,11 @@ $python = "$proxyDir\.venv\Scripts\python.exe"
 $curl = "$env:SystemRoot\System32\curl.exe"
 $acctMap = @{ '666' = '666810082889'; '020' = '020100053835' }
 $acct = $acctMap[$Account]
-if ($Port -eq 0) { $Port = if ($Account -eq '666') { 8003 } else { 8005 } }
+if ($Port -eq 0) { $Port = if ($Account -eq '666') { 8007 } else { 8005 } }
+# 上面 666 的副本口径 2026-09-28 从 8003 改成 8007：8003/50053 已是第三个账户 2986 的
+# **生产**口（2986 = G:\qmt2 / 服务 QMTProxy-2986）⇒ 继续把 8003 当"空闲彩排口"，
+# 轻则与生产抢端口，重则这个会**真发撤单单**的工具直接打到 2986 的生产实例上。
+# 8005（非 666 账户的副本口）与生产口 8001/8002 都不动。
 if ($ConfigYml -eq '') { $ConfigYml = Join-Path $proxyDir "config.local.$Account.yml" }
 if ($FormulaLog -eq '') { $FormulaLog = "G:\qmt$($Account -replace '666','1')\userdata\log\XtClient_FormulaOutput_$(Get-Date -Format 'yyyyMMdd').log" }
 

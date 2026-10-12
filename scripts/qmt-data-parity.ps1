@@ -16,14 +16,19 @@
   side only (creating one on the live mini service would leave state behind and
   there is no DELETE route).
 
-  USAGE (normally run against the 8003 bridge test instance)
+  USAGE (normally run against the 8007 bridge test instance)
     qmt-data-parity.ps1 -PortA 8002 -YmlA config.local.666.yml `
-                        -PortB 8003 -YmlB config.local.666.yml
+                        -PortB 8007 -YmlB config.local.666.yml
+
+  端口（2026-09-28）：彩排副本的默认口 8003/50053 已让给第三个账户 2986 的生产
+  （2986 = G:\qmt2 / 服务 QMTProxy-2986），副本改用 8007/50057 —— 本工具会真发请求，
+  对副本口用错端口就等于把彩排打到生产实例上。生产口 8001/8002（-PortA 一侧）
+  一律不动。
 #>
 param(
     [int]$PortA = 8002,
     [string]$YmlA = 'config.local.666.yml',
-    [int]$PortB = 8003,
+    [int]$PortB = 8007,
     [string]$YmlB = 'config.local.666.yml',
     [string]$Symbol = '600000.SH',
     [string]$Index = '000300.SH'

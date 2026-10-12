@@ -29,9 +29,10 @@
     qmt-order-methods.ps1 -Account 666 -Mode status   # default, read-only
     qmt-order-methods.ps1 -Account 666 -Mode on
     qmt-order-methods.ps1 -Account 666 -Mode off
+    qmt-order-methods.ps1 -Account 2986 -Mode status  # third install (G:\qmt2)
 #>
 param(
-    [ValidateSet('666', '020')] [string]$Account = '666',
+    [ValidateSet('666', '020', '2986')] [string]$Account = '666',
     [ValidateSet('status', 'on', 'off')] [string]$Mode = 'status',
     [string]$ConfigPath = '',
     [switch]$SkipProbe
@@ -41,12 +42,16 @@ $ErrorActionPreference = 'Stop'
 function Say($m) { Write-Output ((Get-Date -Format 'HH:mm:ss') + '  ' + $m) }
 
 $cfgMap = @{
-    '666' = 'G:\qmt1\python\bigqmt_signal_trader_local_config.py'
-    '020' = 'G:\qmt\python\bigqmt_signal_trader_local_config.py'
+    # One local config per install; -Account is the key, ValidateSet is the gate
+    # (an account with no entry here would otherwise resolve to an empty path).
+    '666'  = 'G:\qmt1\python\bigqmt_signal_trader_local_config.py'
+    '020'  = 'G:\qmt\python\bigqmt_signal_trader_local_config.py'
+    '2986' = 'G:\qmt2\python\bigqmt_signal_trader_local_config.py'
 }
 $acctMap = @{
-    '666' = '666810082889'
-    '020' = '020100053835'
+    '666'  = '666810082889'
+    '020'  = '020100053835'
+    '2986' = '666656292986'
 }
 $cfg = $cfgMap[$Account]
 # -ConfigPath exists so the write path can be rehearsed on a throwaway copy

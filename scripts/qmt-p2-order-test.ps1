@@ -51,7 +51,7 @@
 #>
 param(
     [string]$Account = '666810082889',
-    [int]$Port = 8003,
+    [int]$Port = 8007,
     [string]$ConfigYml = 'G:\qmt_projects\quant-qmt-proxy\config.local.666.yml',
     [string]$Stock = '600000.SH',
     [int]$Volume = 100,
@@ -63,6 +63,10 @@ param(
     [switch]$AllowNoLimitCheck,
     [switch]$Go
 )
+# 端口（2026-09-28）：彩排副本默认口 8003 → 8007。8003/50053 已让给第三个账户 2986 的
+# **生产**（2986 = G:\qmt2 / 服务 QMTProxy-2986）；本工具是这几个里**唯一会真下单**的，
+# 端口落到生产实例上就是把 P2 探针打进真实账户。生产口 8001/8002 一律不动。
+# 注：-ConfigYml / -FormulaLog / -MsgLog 仍指向 666 —— 这份副本跑的就是 666 的配置。
 $ErrorActionPreference = 'Stop'
 
 # A rehearsal may NEVER place an order: it skips gate 1 (so the evidence path

@@ -33,6 +33,11 @@
       it must happen while the client is STOPPED -- QMT writes the whole file back
       when it exits, so an edit made while it runs is silently lost.
 
+  The XML lives in every install (third one added 2026-09-28):
+      G:\qmt1\config\indexUserConfig.xml     (666)
+      G:\qmt\config\indexUserConfig.xml      (020)
+      G:\qmt2\config\indexUserConfig.xml     (2986)
+
   SAFETY DESIGN
     * the edit is BYTE-LEVEL: `<field>="` is pure ASCII, so we never decode
       and re-encode the 75 KB XML (no encoding/BOM risk at all).
@@ -50,6 +55,7 @@
   USAGE
     qmt-set-autorun.ps1 -Account 020 -Mode status
     qmt-set-autorun.ps1 -Account 020 -Mode on
+    qmt-set-autorun.ps1 -Account 2986 -Mode status
     qmt-set-autorun.ps1 -Account 020 -Field runMode -Mode status
     qmt-set-autorun.ps1 -Account 020 -Field runMode -Mode on
     qmt-set-autorun.ps1 -Account 666 -Mode on -ConfigPath C:/temp/copy.xml   # rehearsal
@@ -63,7 +69,7 @@
     6 this install's client is running -- stop it first (or pass -Force)
 #>
 param(
-    [ValidateSet('666', '020')] [string]$Account = '666',
+    [ValidateSet('666', '020', '2986')] [string]$Account = '666',
     [ValidateSet('status', 'on', 'off')] [string]$Mode = 'status',
     [string]$Field = 'startupAutorun',
     [string]$ConfigPath = '',
@@ -79,8 +85,12 @@ if ($Field -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
 $tag = if ($Field -eq 'startupAutorun') { 'autorun' } else { $Field }
 
 $instMap = @{
-    '666' = @{ Dir = 'G:\qmt1'; Acct = '666810082889' }
-    '020' = @{ Dir = 'G:\qmt';  Acct = '020100053835' }
+    # One entry per QMT install.  The -Account value IS the key, so an account that
+    # is missing here has no directory to resolve -- the ValidateSet above is what
+    # refuses it up front (fail-closed, no default install).
+    '666'  = @{ Dir = 'G:\qmt1'; Acct = '666810082889' }
+    '020'  = @{ Dir = 'G:\qmt';  Acct = '020100053835' }
+    '2986' = @{ Dir = 'G:\qmt2'; Acct = '666656292986' }
 }
 $root = $instMap[$Account].Dir
 $acct = $instMap[$Account].Acct

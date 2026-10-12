@@ -20,10 +20,11 @@
   USAGE
     qmt-register-check.ps1 -Account 666     # expect REGISTERED + bound to 666
     qmt-register-check.ps1 -Account 020     # expect NOT REGISTERED before the UI step
+    qmt-register-check.ps1 -Account 2986    # third install (G:\qmt2), same four pieces
   Exit 0 = as expected for that account, 1 = problem, 2 = bad invocation.
 #>
 param(
-    [ValidateSet('666', '020')] [string]$Account = '666'
+    [ValidateSet('666', '020', '2986')] [string]$Account = '666'
 )
 $ErrorActionPreference = 'Continue'
 
@@ -33,8 +34,16 @@ $map = @{
     # (its message log shows two successful-login lines), so the UI account picker offers
     # two choices and "bound to the wrong one" is a live possibility -- it must be
     # reported as a failure, not as an unknown value.
-    '666' = @{ Dir = 'G:\qmt1'; Acct = '666810082889'; Others = @('020100053835') }
-    '020' = @{ Dir = 'G:\qmt';  Acct = '020100053835'; Others = @('666810082889', '902010000340') }
+    #
+    # 2986 (2026-09-28): a THIRD install (G:\qmt2, service QMTProxy-2986, port 8003).
+    # Which accounts its own login window offers has NOT been measured yet, so its
+    # 'Others' list is the full set of accounts known on this machine.  That is the
+    # safe direction: listing an account the picker does not actually offer can only
+    # make the failure message slightly less precise, it can never turn a wrong
+    # binding into a pass (both branches below are failures).
+    '666'  = @{ Dir = 'G:\qmt1'; Acct = '666810082889'; Others = @('020100053835') }
+    '020'  = @{ Dir = 'G:\qmt';  Acct = '020100053835'; Others = @('666810082889', '902010000340') }
+    '2986' = @{ Dir = 'G:\qmt2'; Acct = '666656292986'; Others = @('666810082889', '020100053835', '902010000340') }
 }
 $dir = $map[$Account].Dir
 $acct = $map[$Account].Acct

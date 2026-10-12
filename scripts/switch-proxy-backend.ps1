@@ -18,9 +18,15 @@
     .\switch-proxy-backend.ps1 -Service QMTProxy-666 -Backend bridge -DryRun
     .\switch-proxy-backend.ps1 -Service QMTProxy-666 -Backend bridge
     .\switch-proxy-backend.ps1 -Service QMTProxy-666 -Backend mini
+
+.EXIT CODES
+    0 = switched (verified)
+    1 = switch failed and the previous environment was rolled back
+    2 = refused before touching anything (unknown service / empty environment)
+    3 = refused before touching anything (bridge pre-flight probe not ready)
 #>
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('QMTProxy-020','QMTProxy-666')][string]$Service,
+    [Parameter(Mandatory=$true)][ValidateSet('QMTProxy-020','QMTProxy-666','QMTProxy-2986')][string]$Service,
     [Parameter(Mandatory=$true)][ValidateSet('bridge','mini')][string]$Backend,
     [string]$AccountId,
     [int]$Port,
@@ -77,10 +83,41 @@ function Get-NetstatListenerPid([int]$p) {
     return @($out | Select-Object -Unique)
 }
 
-# Defaults per service (020 and 666 are two independent QMT installations)
-if (-not $AccountId)   { $AccountId   = if ($Service -eq 'QMTProxy-020') { '020100053835' } else { '666810082889' } }
-if (-not $Port)        { $Port        = if ($Service -eq 'QMTProxy-020') { 8001 } else { 8002 } }
-if (-not $MiniUserData){ $MiniUserData= if ($Service -eq 'QMTProxy-020') { 'G:\qmt\userdata_mini' } else { 'G:\qmt1\userdata_mini' } }
+# Per-service facts: ONE EXPLICIT TABLE, LOOKED UP, FAIL-CLOSED.
+#
+# 2026-09-28 (third account 2986) -- this used to be a two-way if/else
+#     if ($Service -eq 'QMTProxy-020') { <020 values> } else { <666 values> }
+# where the `else` was an unguarded DEFAULT, so any service that was not
+# QMTProxy-020 silently got 666's account id, port and userdata.  That is
+# exactly the shape of the 2026-09-15 A6 incident (a second proxy quietly
+# serving the FIRST account: 8001 returning 666's data and orders landing in the
+# wrong account, with no error anywhere).  With three installs on one machine the
+# blast radius grows, so a service that is not in this table is now a hard
+# failure: NO fallback, no "assume 666", refuse before touching the service.
+#
+# Every entry carries the four facts that identify an instance:
+#   Account      = BIGQMT_ACCOUNT_ID written into AppEnvironmentExtra for the bridge
+#   Port         = the proxy's HTTP port (the one this script restarts + probes)
+#   MiniUserData = userdata_mini of THAT install (only used on -Backend mini)
+#   GrpcPort     = that instance's gRPC port.  NOT consumed by this script; kept
+#                  here so the three-instance facts live in one place instead of
+#                  being re-derived (read by hand / by other tooling).
+$svcFacts = @{
+    'QMTProxy-020'  = @{ Account = '020100053835'; Port = 8001; MiniUserData = 'G:\qmt\userdata_mini';  GrpcPort = 50051 }
+    'QMTProxy-666'  = @{ Account = '666810082889'; Port = 8002; MiniUserData = 'G:\qmt1\userdata_mini'; GrpcPort = 50052 }
+    'QMTProxy-2986' = @{ Account = '666656292986'; Port = 8003; MiniUserData = 'G:\qmt2\userdata_mini'; GrpcPort = 50053 }
+}
+$facts = $svcFacts[$Service]
+if ($null -eq $facts) {
+    Say ("ERROR: unknown service '" + $Service + "' -- it is not in the per-service table.")
+    Say ("       known services: " + (($svcFacts.Keys | Sort-Object) -join ', '))
+    Say '       REFUSING (fail-closed).  The old code would have fallen back to 666 here,'
+    Say '       i.e. pointed this service at ANOTHER account''s port and account id.'
+    exit 2
+}
+if (-not $AccountId)    { $AccountId    = $facts.Account }
+if (-not $Port)         { $Port         = $facts.Port }
+if (-not $MiniUserData) { $MiniUserData = $facts.MiniUserData }
 $bridgePath = 'C:\bridge-client\bridge\src;C:\bridge-client'
 
 Say "=== switch $Service -> $Backend (account=$AccountId port=$Port dryRun=$DryRun) ==="
@@ -183,7 +220,12 @@ $ok = $cimOk -or $nsOk
 if ($nsOk -and (-not $cimOk)) { Say "note: CIM saw NO listener on $Port but netstat did (known CIM flake; treating as bound)" }
 if ($ok) {
     try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health/" -TimeoutSec 10
+        # --noproxy "*" : this box carries a system proxy (HKU Internet Settings
+        # ProxyEnable=1 / 127.0.0.1:7890) and Invoke-RestMethod honours it, so a
+        # localhost probe can be routed through the proxy and FAIL when the proxy is
+        # down (observed 2026-09-28: WinError 10061).  curl.exe is what every other
+        # tool in this toolbox already uses, so use it here too.
+        $r = (& "$K\curl.exe" -s --noproxy '*' -m 10 "http://127.0.0.1:$Port/health/") | ConvertFrom-Json
         Say ("health: " + $r.data.status + " (backend now " + (Get-EnvLines | Where-Object { $_ -match '^PYTHONPATH=' }) + ")")
     } catch { Say "health probe failed: $($_.Exception.Message)"; $ok = $false }
 }

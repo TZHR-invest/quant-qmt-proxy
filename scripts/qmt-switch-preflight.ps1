@@ -7,12 +7,12 @@
 
   It checks, in order:
     1. the clock (and REFUSES if we are inside A-share trading hours)
-    2. both proxy services: state, listening port, current backend
-    3. both accounts' /health/ready
-    4. bridge RPC probes (666 should be READY; 020 is NOT until its strategy
-       has been registered -- that is expected, not a failure)
+    2. all three proxy services: state, listening port, current backend
+    3. all three accounts' /health/ready
+    4. bridge RPC probes (666 should be READY; 020 and 2986 are NOT until their
+       strategy has been registered -- that is expected, not a failure)
     5. QMT process inventory: XtItClient **per install** (one each is normal --
-       there are two installations now; only >1 from the SAME install is a zombie) /
+       there are three installations now; only >1 from the SAME install is a zombie) /
        orphan miniquote / mini count
     6. link files by EXPLICIT name (never a link* glob -- it would list and could
        delete LinkageTrade.dll)
@@ -69,7 +69,10 @@ if ($inSession -and -not $Force) {
 
 # ---- 2. services and ports -------------------------------------------------
 Head 'proxy services'
-$svcMap = [ordered]@{ 'QMTProxy-666' = 8002; 'QMTProxy-020' = 8001 }
+# All three installs.  A service missing from this table is a service whose port,
+# state and backend this preflight would silently NOT check -- and a preflight
+# that skips one account still prints "GO".
+$svcMap = [ordered]@{ 'QMTProxy-666' = 8002; 'QMTProxy-020' = 8001; 'QMTProxy-2986' = 8003 }
 foreach ($svc in $svcMap.Keys) {
     $port = $svcMap[$svc]
     $state = (& "$K\sc.exe" query $svc 2>&1 | Select-String 'STATE' | ForEach-Object { $_.ToString().Trim() }) -join ' '
@@ -107,7 +110,7 @@ Say ("  bridge path that will be injected: C:\bridge-client\bridge\src;C:\bridge
 if (-not (Test-Path -LiteralPath 'C:\bridge-client\bridge\src\bigqmt_signal_trader\xtquant_compat.py')) {
     Block 'the bridge client checkout is missing: C:\bridge-client\bridge\src\bigqmt_signal_trader\xtquant_compat.py'
 }
-foreach ($q in @('G:\qmt1\python\bigqmt_signal_trader_local_config.py', 'G:\qmt\python\bigqmt_signal_trader_local_config.py')) {
+foreach ($q in @('G:\qmt1\python\bigqmt_signal_trader_local_config.py', 'G:\qmt\python\bigqmt_signal_trader_local_config.py', 'G:\qmt2\python\bigqmt_signal_trader_local_config.py')) {
     if (Test-Path -LiteralPath $q) { Say ("  strategy local config present: " + $q) } else { Block ("missing strategy local config: " + $q) }
 }
 
@@ -151,14 +154,17 @@ if (-not $newest) {
 Head 'health and bridge probes'
 $key666 = ''
 $key020 = ''
-foreach ($pair in @(@('666', "$proxyDir\config.local.666.yml"), @('020', "$proxyDir\config.local.020.yml"))) {
+$key2986 = ''
+foreach ($pair in @(@('666', "$proxyDir\config.local.666.yml"), @('020', "$proxyDir\config.local.020.yml"), @('2986', "$proxyDir\config.local.2986.yml"))) {
     $tag = $pair[0]; $yml = $pair[1]
     if (-not (Test-Path -LiteralPath $yml)) { Block "config yml missing: $yml"; continue }
     $m = [regex]::Match([System.IO.File]::ReadAllText($yml, [System.Text.Encoding]::UTF8), 'api_keys:\s*\r?\n\s*-\s*"?([^"\r\n]+?)"?\s*\r?\n')
     if (-not $m.Success) { Block "cannot read api_keys[0] from $yml"; continue }
-    if ($tag -eq '666') { $key666 = $m.Groups[1].Value.Trim() } else { $key020 = $m.Groups[1].Value.Trim() }
+    if ($tag -eq '666') { $key666 = $m.Groups[1].Value.Trim() }
+    elseif ($tag -eq '020') { $key020 = $m.Groups[1].Value.Trim() }
+    else { $key2986 = $m.Groups[1].Value.Trim() }
 }
-foreach ($pair in @(@('666', 8002, '666810082889', $key666), @('020', 8001, '020100053835', $key020))) {
+foreach ($pair in @(@('666', 8002, '666810082889', $key666), @('020', 8001, '020100053835', $key020), @('2986', 8003, '666656292986', $key2986))) {
     $tag = $pair[0]; $port = $pair[1]; $acct = $pair[2]; $key = $pair[3]
     if ($key -ne '') {
         $h = & "$K\curl.exe" -s -H "Authorization: Bearer $key" "http://127.0.0.1:$port/health/ready" 2>&1 | Out-String
@@ -184,6 +190,11 @@ foreach ($pair in @(@('666', 8002, '666810082889', $key666), @('020', 8001, '020
     }
     $probe = (& $python "$proxyDir\scripts\bridge_rpc_probe.py" $acct 8 2>&1 | Out-String).Trim()
     Say ("  $tag bridge probe   : " + $probe)
+    # Only 666 is WARNed on: it is the known-good positive control, so a silent 666
+    # bridge means the switch has nothing to land on.  020 and 2986 legitimately
+    # read NOT_READY until their in-QMT strategy has been registered (and, for 2986,
+    # until its install has been brought up at all) -- a warn there would be noise,
+    # and noise is what gets a preflight ignored.
     if ($tag -eq '666' -and $probe -notmatch '^READY') {
         Warn 'the 666 bridge does not answer yet -- the strategy must be running before the switch'
     }
@@ -199,18 +210,18 @@ foreach ($name in @('XtItClient.exe', 'XtMiniQmt.exe', 'miniquote.exe', 'XtQuant
         Say ("                     $detail")
     }
 }
-# Zombie test is PER INSTALL, not global (2026-09-15 fix).
+# Zombie test is PER INSTALL, not global (2026-09-15 fix, third install 2026-09-28).
 #
 # The old rule was `if ($it.Count -gt 1)`, correct when this machine had ONE QMT
-# installation.  After the migration there are TWO (`G:\qmt1` = 666, `G:\qmt` =
-# 020) and each one legitimately runs its own XtItClient.exe -- that is the
-# architecture, not a leak.  Counting globally produced a **false NO-GO at 12:46**
-# while both clients were logged in and both channels were healthy; the dangerous
-# part is that it invites "clean up first", i.e. killing a live trading client.
-# A real zombie is "more than one client FROM THE SAME INSTALL" (those are what
-# make the launcher hang).
+# installation.  After the migration there are THREE (`G:\qmt1` = 666, `G:\qmt` =
+# 020, `G:\qmt2` = 2986) and each one legitimately runs its own XtItClient.exe --
+# that is the architecture, not a leak.  Counting globally produced a **false NO-GO
+# at 12:46** while both clients were logged in and both channels were healthy; the
+# dangerous part is that it invites "clean up first", i.e. killing a live trading
+# client.  A real zombie is "more than one client FROM THE SAME INSTALL" (those are
+# what make the launcher hang).
 $it = @(Get-Process -Name 'XtItClient' -ErrorAction SilentlyContinue)
-$instDirs = @('G:\qmt1\bin.x64', 'G:\qmt\bin.x64')
+$instDirs = @('G:\qmt1\bin.x64', 'G:\qmt\bin.x64', 'G:\qmt2\bin.x64')
 $perInst = @{}
 foreach ($d in $instDirs) { $perInst[$d] = @() }
 $strayClients = @()
@@ -231,7 +242,7 @@ foreach ($d in $instDirs) {
     if ($n -gt 1) { Block ("$n XtItClient.exe from $d -- those ARE zombies and make the launcher hang; clean up by pid first") }
     if ($n -eq 0) { Warn ("no XtItClient.exe from $d -- that install's big-QMT bridge would be down") }
 }
-foreach ($s in $strayClients) { Warn "XtItClient outside the two known installs: $s" }
+foreach ($s in $strayClients) { Warn "XtItClient outside the three known installs: $s" }
 $mini = @(Get-Process -Name 'XtMiniQmt' -ErrorAction SilentlyContinue)
 if ($mini.Count -lt 1) { Warn 'no XtMiniQmt.exe running (the mini link is what we are moving away from, so this is informational)' }
 $orphan = 0
@@ -244,7 +255,7 @@ if ($orphan) { Warn "$orphan orphan miniquote.exe process(es) (parent gone)" }
 # ---- 6. link files by explicit name ---------------------------------------
 Head 'link files (explicit names only)'
 $linkNames = @('linkQmt', 'linkMini', 'linkMiniQmt', 'link_reboot', 'linkResearchMini', 'linkResearchMini_reboot')
-foreach ($dir in @('G:\qmt1\bin.x64', 'G:\qmt\bin.x64')) {
+foreach ($dir in @('G:\qmt1\bin.x64', 'G:\qmt\bin.x64', 'G:\qmt2\bin.x64')) {
     $found = @()
     foreach ($n in $linkNames) { if (Test-Path -LiteralPath (Join-Path $dir $n)) { $found += $n } }
     $linkage = Test-Path -LiteralPath (Join-Path $dir 'LinkageTrade.dll')

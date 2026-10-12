@@ -15,8 +15,11 @@
     *** The boot chain and the proxy backend must always agree. ***
     If QMT boots as big QMT while a proxy still expects miniQMT, restart-proxy.ps1
     waits for a XtMiniQmt.exe that will never appear, so the service is NEVER
-    started.  This script therefore cross-checks both services' NSSM environment
-    and refuses a mismatch unless -Force is given.
+    started.  This script therefore cross-checks EVERY proxy service's NSSM
+    environment (020 / 666 / 2986 -- all three installs) and refuses a mismatch
+    unless -Force is given.  Missing just one service here is not cosmetic: the
+    unchecked install could sit on the opposite backend while this script happily
+    reported that boot chain and backends agree.
 
 .EXAMPLE
     .\qmt-boot-chain.ps1 -Target bigqmt -DryRun
@@ -67,16 +70,24 @@ function Get-Backend([string]$svc) {
 $want = if ($Target -eq 'bigqmt') { 'bridge' } else { 'mini' }
 $b020 = Get-Backend 'QMTProxy-020'
 $b666 = Get-Backend 'QMTProxy-666'
+# 2026-09-28: third install (G:\qmt2 / QMTProxy-2986 / account 666656292986).  It
+# is part of the same logon chain (qmt-boot-both.ps1 runs its leg too), so it must
+# be part of the same cross-check -- a service that is not read here is a service
+# whose mismatch this script would let through.
+$b2986 = Get-Backend 'QMTProxy-2986'
 
 Say "=== boot chain -> $Target (proxy side should be '$want') ==="
 Say "  QMTProxy-020 backend = $b020"
 Say "  QMTProxy-666 backend = $b666"
+Say "  QMTProxy-2986 backend = $b2986"
 
 $mismatch = @()
 if ($Target -eq 'bigqmt') { if ($b020 -ne 'bridge') { $mismatch += 'QMTProxy-020' }
-                            if ($b666 -ne 'bridge') { $mismatch += 'QMTProxy-666' } }
+                            if ($b666 -ne 'bridge') { $mismatch += 'QMTProxy-666' }
+                            if ($b2986 -ne 'bridge') { $mismatch += 'QMTProxy-2986' } }
 else                      { if ($b020 -eq 'bridge') { $mismatch += 'QMTProxy-020' }
-                            if ($b666 -eq 'bridge') { $mismatch += 'QMTProxy-666' } }
+                            if ($b666 -eq 'bridge') { $mismatch += 'QMTProxy-666' }
+                            if ($b2986 -eq 'bridge') { $mismatch += 'QMTProxy-2986' } }
 
 if ($mismatch.Count -gt 0) {
     $msg = "proxy backend does NOT match target '$Target' for: " + ($mismatch -join ', ')
@@ -104,8 +115,9 @@ $script = if ($Target -eq 'bigqmt') { "$proxyDir\scripts\qmt-boot-both.ps1" }
 # That was survivable while miniQMT auto-started itself from the HKCU Run keys, but
 # removing those keys IS the "give up miniQMT" step, so a logon would then leave 020
 # with no client at all and its bridge permanently down.  qmt-boot-both.ps1 runs the
-# 666 leg and then the 020 leg (both already verified end-to-end) and reports both
-# exit codes; a failure of the first leg does not stop the second.
+# 666 leg, the 020 leg and (since 2026-09-28) the 2986 leg -- all the same verified
+# call shape -- and reports every exit code; a failure of one leg does not stop the
+# following ones.
 # 2026-09-15 17:11 (cold-boot drill): this used to be '-ObserveSec 0'.  The
 # launcher's LAST act is a strategy-liveness check, and `startupAutorun` only
 # starts the in-QMT strategy a few seconds AFTER the login is confirmed

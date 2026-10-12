@@ -22,8 +22,21 @@
     # bind the second value to a positional parameter instead)
     qmt-compare-backends.ps1 -CompareA mini-before -CompareB bridge-after
 
+    # third install (2026-09-28): 2986 = G:\qmt2 / QMTProxy-2986 / port 8003.
+    # -Port and -ConfigYml are DERIVED from -Account when omitted, so this is
+    # enough -- and it cannot silently fall back to 666's 8002:
+    qmt-compare-backends.ps1 -Capture bridge-2986 -Account 666656292986
+
   Snapshots land in <proxyDir>\logs\cmp\ (or -OutDir).  -CompareA/-CompareB
   accept bare labels and resolve them inside that directory.
+
+  ACCOUNT TABLE (why the account drives the port)
+    Each row is one production install; -Account is looked up here and REFUSES an
+    account that has no row.  Reason: the previous defaults were fixed to 666's
+    (8002 / config.local.666.yml), so capturing a new account without passing
+    -Port would have read 666's channel and then reported the two 666 snapshots as
+    "EQUIVALENT" -- a green light for an account that was never measured.
+    A port that belongs to a DIFFERENT account's production channel is refused too.
 
   WHAT IS EXPECTED TO DIFFER (listed separately so real differences stand out)
     health.backend        mini -> bridge   (this is the point of the switch)
@@ -32,9 +45,11 @@
 #>
 param(
     [string]$Capture = '',
-    [int]$Port = 8002,
-    [string]$Account = '666810082889',
-    [string]$ConfigYml = 'config.local.666.yml',
+    # 0 / '' = derive from the -Account table below (see ACCOUNT TABLE).  The
+    # historical default account (666810082889) is kept, just named explicitly.
+    [int]$Port = 0,
+    [string]$Account = '',
+    [string]$ConfigYml = '',
     [string]$Symbol = '600000.SH',
     [string]$CompareA = '',
     [string]$CompareB = '',
@@ -45,6 +60,47 @@ $ErrorActionPreference = 'Stop'
 
 $proxyDir = 'G:\qmt_projects\quant-qmt-proxy'
 $curl = "$env:SystemRoot\System32\curl.exe"
+
+# Per-account facts -- one row per production install.  See ACCOUNT TABLE above:
+# a missing row is a hard refusal, never a default.
+# (No `Say` yet at this point in the file -- it is defined further down -- so these
+# early refusals print with Write-Output directly, which is what Say does anyway.)
+$acctFacts = @{
+    '666810082889' = @{ Port = 8002; Yml = 'config.local.666.yml';  Install = 'G:\qmt1' }
+    '020100053835' = @{ Port = 8001; Yml = 'config.local.020.yml';  Install = 'G:\qmt' }
+    '666656292986' = @{ Port = 8003; Yml = 'config.local.2986.yml'; Install = 'G:\qmt2' }
+}
+if ($Account -eq '') { $Account = '666810082889' }
+$facts = $acctFacts[$Account]
+if ($null -eq $facts) {
+    Write-Output ("ERROR: unknown account '" + $Account + "' -- it has no row in the account table.")
+    Write-Output ("       known accounts: " + (($acctFacts.Keys | Sort-Object) -join ', '))
+    Write-Output '       REFUSING (fail-closed).  The old defaults were fixed to 666810082889 on port 8002,'
+    Write-Output '       so an account captured there would be compared with 666 and reported EQUIVALENT.'
+    exit 2
+}
+if ($Port -eq 0) { $Port = $facts.Port }
+if ($ConfigYml -eq '') { $ConfigYml = $facts.Yml }
+if ($Port -ne $facts.Port) {
+    # A production port that belongs to a DIFFERENT account is the cross-account
+    # mistake itself -- refuse.  Any other port is treated as an explicit spare-port
+    # replica (8004/8007 are used for those) and only warned about.
+    $owner = ''
+    foreach ($other in $acctFacts.Keys) {
+        if ($other -ne $Account -and $Port -eq $acctFacts[$other].Port) { $owner = $other; break }
+    }
+    if ($owner -ne '') {
+        Write-Output ("ERROR: -Account " + $Account + " with -Port " + $Port + " -- port " + $Port + " is " + $owner + "'s production channel.")
+        Write-Output ("       REFUSING (fail-closed): that capture would read " + $owner + "'s data and label it " + $Account + ",")
+        Write-Output ("       and a diff against another " + $owner + " snapshot would print EQUIVALENT.")
+        Write-Output ("       " + $Account + " lives on port " + $facts.Port + ".")
+        exit 2
+    }
+    Write-Output ("WARN: account " + $Account + " normally lives on port " + $facts.Port + " but -Port " + $Port + " was given.")
+    Write-Output '      Proceeding with the EXPLICIT port (spare-port replicas do this on purpose).'
+    Write-Output '      If you did not mean that, this capture is NOT that account''s production channel.'
+}
+
 if ($OutDir -eq '') { $OutDir = "$proxyDir\logs\cmp" }
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 if (-not [System.IO.Path]::IsPathRooted($ConfigYml)) { $ConfigYml = Join-Path $proxyDir $ConfigYml }

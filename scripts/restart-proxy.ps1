@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Restart quant-qmt-proxy services (both accounts).
+    Restart quant-qmt-proxy services (all three accounts: 020 / 666 / 2986).
     Designed to run daily before market open (e.g. 08:00 via Task Scheduler).
 .DESCRIPTION
     1. Stop all proxy processes (run.py / start.py)
     2. Wait for clean shutdown
-    3. Start both account proxies (020 and 666)
+    3. Start all three account proxies (020, 666 and 2986)
     4. Verify they're listening on expected ports
 #>
 
@@ -93,9 +93,24 @@ function Get-Backend([string]$service) {
 }
 
 $qmtChecks = @(
-    @{ Label = "020 (G:\qmt)";  Service = "QMTProxy-020"; Path = "G:\qmt\userdata_mini";  Account = "020100053835"; Exe = "G:\qmt\bin.x64\XtMiniQmt.exe" },
-    @{ Label = "666 (G:\qmt1)"; Service = "QMTProxy-666"; Path = "G:\qmt1\userdata_mini"; Account = "666810082889"; Exe = "G:\qmt1\bin.x64\XtMiniQmt.exe" }
+    @{ Label = "020 (G:\qmt)";   Service = "QMTProxy-020";  Path = "G:\qmt\userdata_mini";  Account = "020100053835"; Exe = "G:\qmt\bin.x64\XtMiniQmt.exe" },
+    @{ Label = "666 (G:\qmt1)";  Service = "QMTProxy-666";  Path = "G:\qmt1\userdata_mini"; Account = "666810082889"; Exe = "G:\qmt1\bin.x64\XtMiniQmt.exe" },
+    @{ Label = "2986 (G:\qmt2)"; Service = "QMTProxy-2986"; Path = "G:\qmt2\userdata_mini"; Account = "666656292986"; Exe = "G:\qmt2\bin.x64\XtMiniQmt.exe" }
 )
+# Every entry here is looked up by SERVICE NAME, so a service that is missing from
+# this table is a service this script would never wait for and never restart.  The
+# third account (2986) is on the table as of 2026-09-28 precisely because of that:
+# 8003 would otherwise come up against a dead backend, or not come up at all.
+#
+# Is 2986 at risk of the "unknown service reads as mini" trap in Get-Backend?
+# Checked, and no: Get-Backend reads THAT service's own NSSM AppEnvironmentExtra,
+# and QMTProxy-2986 was registered by replicating QMTProxy-666, so it carries
+# PYTHONPATH=<bridge> + BIGQMT_ACCOUNT_ID=666656292986 and reads back as 'bridge'.
+# The "assume mini" branch only triggers when the env cannot be read at all
+# (service absent / nssm error), and even then it is not a silent wrong start: the
+# mini branch demands a XtMiniQmt.exe whose ExecutablePath is under THAT install's
+# bin.x64, which a full-client-only install never has, so the wait times out and
+# the script aborts instead of starting a proxy on a guessed backend.
 foreach ($q in $qmtChecks) { $q.Backend = Get-Backend $q.Service }
 foreach ($q in $qmtChecks) { Write-Log "backend: $($q.Label) -> $($q.Backend)" }
 
@@ -145,10 +160,10 @@ if (-not $allReady) {
 Write-Log "all channels ready, restarting proxy services..."
 
 # --- Step 1: Stop proxy services (NSSM managed) ---
-# 代理由 NSSM 服务 QMTProxy-020 / QMTProxy-666 托管，必须通过服务控制停止，
+# 代理由 NSSM 服务 QMTProxy-020 / QMTProxy-666 / QMTProxy-2986 托管，必须通过服务控制停止，
 # 否则 nssm 会立即拉起被杀掉的进程，与手动启动产生双实例/端口冲突。
 Write-Log "Stopping proxy services..."
-foreach ($svc in @("QMTProxy-020", "QMTProxy-666")) {
+foreach ($svc in @("QMTProxy-020", "QMTProxy-666", "QMTProxy-2986")) {
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
     if ($s -and $s.Status -ne "Stopped") {
         Write-Log "Stopping service $svc..."
@@ -170,6 +185,15 @@ foreach ($svc in @("QMTProxy-020", "QMTProxy-666")) {
 Write-Log "All proxy services stopped."
 
 # --- Step 1.5: Clean 666's tick cache (trading-only, no need to keep historical tick) ---
+# Per-account data directories, for the record (probed 2026-09-28):
+#   666  -> D:\qmt1_data          (this cleanup below)
+#   020  -> (no cleanup here)
+#   2986 -> G:\qmt2\userdata_mini\datadir -- a LOCAL directory on G:, it is NOT
+#           symlinked/junctioned to D: like 666's cache is.
+# NOTE (deliberate non-change): no delete/prune step is added for 2986.  Deleting
+# data is irreversible and this script has no measured basis for pruning the third
+# account's datadir -- if it needs reclaiming, do it as a separate, explicit,
+# audited action (and only while that install's client is stopped).
 $cache666 = "D:\qmt1_data"
 if (Test-Path $cache666) {
     $before = (Get-ChildItem -Path $cache666 -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
@@ -188,7 +212,7 @@ Start-Sleep -Seconds 2
 
 # --- Step 2: Start proxy services (NSSM managed) ---
 Write-Log "Starting proxy services..."
-foreach ($svc in @("QMTProxy-020", "QMTProxy-666")) {
+foreach ($svc in @("QMTProxy-020", "QMTProxy-666", "QMTProxy-2986")) {
     $out = & sc.exe start $svc 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0) {
         Write-Log "Started $svc"
@@ -200,7 +224,7 @@ foreach ($svc in @("QMTProxy-020", "QMTProxy-666")) {
 # --- Step 3: Wait for services to bind ports ---
 Start-Sleep -Seconds 8
 
-$ports = @(8001, 8002, 50051, 50052)
+$ports = @(8001, 8002, 8003, 50051, 50052, 50053)
 $listening = netstat -ano | Select-String "LISTENING"
 foreach ($port in $ports) {
     $found = $listening | Select-String ":$port "
