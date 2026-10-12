@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -14,6 +15,53 @@ from app.services.xttrader_gateway import XTQUANT_TRADER_AVAILABLE, XTTraderGate
 from app.utils.exceptions import TradingServiceException
 from app.utils.helpers import normalize_stock_code, validate_stock_code
 from app.utils.logger import logger
+
+# --- BIGQMT_BOARD_GATE_PATCH (2026-09-28, v2) -------------------------------------------------
+# 按实例的「禁止板块」前缀表，经 NSSM 服务环境变量注入（见
+# scripts/qmt-install-proxy-instance.ps1）。空 ⇒ 闸门是 no-op，即 666/020 的既有行为。
+# ⚠️ v2（2026-09-28 晚）：**只拦买入**。卖出永不拦 —— 已持有的票（转托管进来、或权限
+#    变更前买的）必须能卖掉；拦掉卖出 = 把仓位锁死，而漏拦只多一张废单（不对称）。
+_BRIDGE_DENY_CODE_PREFIXES = tuple(
+    p.strip()
+    for p in str(os.environ.get("BIGQMT_DENY_CODE_PREFIXES", "")).split(",")
+    if p.strip()
+)
+
+
+def _bridge_side_value(side) -> str:
+    """把 OrderSide 枚举或字符串统一成 'BUY'/'SELL'（取 .value，不用子串判据）。"""
+    return str(getattr(side, "value", side) or "").strip().upper()
+
+
+def _bridge_is_buy(side) -> bool:
+    """只认明确的买入：'BUY' 或 xtconstant.STOCK_BUY(23)；其余（含 SELL/None）都不是。"""
+    value = _bridge_side_value(side)
+    return value == "BUY" or value == "23"
+
+
+def _bridge_board_gate(normalized_code: str, side=None):
+    """账户无权限的板块**买入** ⇒ 返回拒绝原因；其余一律 None。
+
+    刻意「黑名单 + 单向」：柜台是最终权威。白名单会误杀主板的 ETF/债券单；拦卖出会把
+    仓位锁死；漏拦只产生一张废单 —— 风险不对称，所以选择「宁漏不误杀」。
+    side 未知（None / 未来新增值）⇒ 放行。
+    """
+    if not _BRIDGE_DENY_CODE_PREFIXES:
+        return None
+    if not _bridge_is_buy(side):
+        return None
+    code = str(normalized_code or "").strip().upper()
+    digits, _, market = code.partition(".")
+    if market == "BJ":
+        return "board not allowed for this account: %s (BSE)" % code
+    for prefix in _BRIDGE_DENY_CODE_PREFIXES:
+        if digits.startswith(prefix):
+            return "board not allowed for this account: %s (denied prefix %s)" % (
+                code,
+                prefix,
+            )
+    return None
+# --- end BIGQMT_BOARD_GATE_PATCH -------------------------------------------------------------
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -255,6 +303,15 @@ class TradingSessionManager:
             raise TradingServiceException("session is not connected to xttrader", "TRADER_NOT_CONNECTED")
 
         normalized_code = normalize_stock_code(command.stock_code)
+        # BIGQMT_BOARD_GATE_PATCH: 板块闸门（本实例的账户权限窄于全市场时启用；未配置则为 no-op）
+        _gate_reason = _bridge_board_gate(normalized_code, command.side)
+        if _gate_reason:
+            logger.warning(
+                f"order refused by board gate: session_id={command.session_id}, "
+                f"account_id={session.account_id}, code={normalized_code}, "
+                f"reason={_gate_reason}"
+            )
+            raise TradingServiceException(_gate_reason, "BOARD_NOT_ALLOWED")
         # D4 (2026-09-15): D1 only covered xttrader answering with a NEGATIVE
         # id.  The bridge does not answer at all -- it RAISES (e.g.
         # ValueError("rpc method is not allowed: order_stock") while the RPC

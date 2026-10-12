@@ -78,7 +78,8 @@ def handle_xtquant_exception(exc: XTQuantException) -> HTTPException:
     elif isinstance(exc, TradingServiceException):
         if exc.error_code == "ORDERS_DISABLED":
             status_code = status.HTTP_403_FORBIDDEN
-        elif exc.error_code in {"ORDER_REJECTED", "CANCEL_REJECTED"}:
+        # BIGQMT_BOARD_GATE_PATCH: 板块闸门拒绝按 422（拒单）返回，而不是落到 else 的 400
+        elif exc.error_code in {"ORDER_REJECTED", "CANCEL_REJECTED", "BOARD_NOT_ALLOWED"}:
             # D1/D4 (2026-09-15): xttrader answered with a negative order id, OR
             # the gateway raised instead of answering (bridge allow-list off).
             # 422 = the broker side said no; 503 = we could not reach it at all.
