@@ -194,12 +194,22 @@ function Test-LoginSuccess([long]$fromOffset) {
 }
 
 # Liveness of the in-QMT strategy: it prints a cadence line every 10 s, so a
-# fresh FormulaOutput log means the bridge is actually running.
+# fresh log means the bridge is actually running.  2026-10-19: the bridge's
+# stdout is redirected to userdata\log\bigqmt_stdout.log (QMT's console pipe
+# backs up and a blocked print parked init(), after which QMT stopped the
+# strategy ~8 s in), so judge on the NEWEST of the two files.
 function Test-StrategyLive {
     $p = Join-Path (Split-Path $BinDir -Parent) 'userdata\log'
-    $f = Join-Path $p ('XtClient_FormulaOutput_' + (Get-Date).ToString('yyyyMMdd') + '.log')
-    if (-not (Test-Path $f)) { return $false }
-    return (((Get-Date) - (Get-Item $f).LastWriteTime).TotalSeconds -lt 60)
+    $newest = $null
+    foreach ($leaf in @('bigqmt_stdout.log', ('XtClient_FormulaOutput_' + (Get-Date).ToString('yyyyMMdd') + '.log'))) {
+        $f = Join-Path $p $leaf
+        if (Test-Path $f) {
+            $it = Get-Item $f
+            if ($null -eq $newest -or $it.LastWriteTime -gt $newest.LastWriteTime) { $newest = $it }
+        }
+    }
+    if ($null -eq $newest) { return $false }
+    return (((Get-Date) - $newest.LastWriteTime).TotalSeconds -lt 60)
 }
 
 function Move-DialogsOffscreen([string]$why) {
@@ -310,13 +320,41 @@ Log "OutDir=$OutDir"
 Dump-State 'pre'
 Move-DialogsOffscreen 'pre'
 
+# 2026-10-19: "the strategy log is fresh" is NOT the same as "the bridge answers".
+# With the pipe transport a strategy can be alive and logging while its pipe is
+# unreachable (err=231 PIPE_BUSY / err=5 ACCESS_DENIED), and this gate used to
+# exit 0 then -- which turned the watchdog's ONLY repair leg into a no-op and
+# left the bridge dead until a human restarted the client (observed 19:07 today).
+# So the no-op gate now also requires a real round trip, judged by the probe's
+# EXIT CODE.  A *timeout* (bridge merely busy, e.g. during the 16:00 archive)
+# must NOT veto the no-op: restarting a busy client would abort the archive.
+function Test-BridgeAnswers {
+    $probe = 'G:\qmt_projects\quant-qmt-proxy\scripts\bridge_rpc_probe.py'
+    $py    = 'G:\qmt_projects\quant-qmt-proxy\.venv\Scripts\python.exe'
+    if (-not (Test-Path $probe) -or -not (Test-Path $py)) { return $null }   # cannot judge
+    & $py $probe $AccountId 20 *> (Join-Path $OutDir 'bridge_probe.txt')
+    $rc = $LASTEXITCODE
+    Log "  bridge probe: rc=$rc $((Get-Content (Join-Path $OutDir 'bridge_probe.txt') -ErrorAction SilentlyContinue | Select-Object -Last 1))"
+    # Exit code is the judgement (structured), never the message text:
+    #   0 = READY          -> the bridge answers; no-op is correct
+    #   3 = transport down -> the strategy may be alive but unreachable; MUST restart
+    #   1 = other (timeout / busy / mismatch) -> do NOT kill a busy client
+    if ($rc -eq 0)  { return $true }
+    if ($rc -eq 3)  { return $false }
+    return $null
+}
+
 if ($SkipIfLoggedIn) {
     $p0 = @(Get-QmtProcs 'XtItClient') | Select-Object -First 1
     if ($p0 -and (Test-StrategyLive)) {
-        Log "already up: XtItClient pid=$($p0.Id) and the bridge strategy is live -> nothing to do"
-        Log "=== full-mode v4 end (no-op) ==="
-        Write-Output "OUTDIR=$OutDir"
-        exit 0
+        $answers = Test-BridgeAnswers
+        if ($answers -ne $false) {
+            Log "already up: XtItClient pid=$($p0.Id) and the bridge strategy is live -> nothing to do"
+            Log "=== full-mode v4 end (no-op) ==="
+            Write-Output "OUTDIR=$OutDir"
+            exit 0
+        }
+        Log "WARNING: strategy log is fresh but the bridge does NOT answer (transport down) -> NOT a no-op; restarting this install"
     }
 }
 
@@ -360,7 +398,10 @@ Log "  verified clean: no XtItClient.exe left for this install"
 Move-DialogsOffscreen 'armed'
 
 Log "launching $Exe"
-$proc = Start-Process -FilePath $Exe -WorkingDirectory $BinDir -PassThru
+# 2026-10-27: the other two installs are launched with the 'reboot' argv
+# (that is how their XtQuantServer/IPC comes up -- without it the client
+# serves the bridge RPC but xttrader.connect() keeps returning -1).
+$proc = Start-Process -FilePath $Exe -WorkingDirectory $BinDir -ArgumentList 'reboot' -PassThru
 Log "launched pid=$($proc.Id)"
 
 $target = $null

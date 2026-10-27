@@ -43,6 +43,20 @@ def main(argv):
         pong = client.call("ping", timeout_seconds=timeout)
     except Exception as exc:  # noqa: BLE001 - any failure is "not ready"
         print("NOT_READY: %s: %s" % (type(exc).__name__, exc))
+        # 2026-10-19: distinguish "the transport itself is down" from "the bridge is
+        # merely slow", because the launcher's -SkipIfLoggedIn gate must only veto
+        # its no-op in the FIRST case -- restarting a busy client would abort the
+        # 16:00 archive.  Judged by TYPE (structured), never by message text.
+        #   3 = transport unreachable (pipe gone / PIPE_BUSY / access denied)
+        #   1 = anything else (timeout, account mismatch, bad response)
+        try:
+            from bigqmt_signal_trader.transports.base import TransportError, TransportTimeout
+        except Exception:
+            return 1
+        if isinstance(exc, TransportTimeout):
+            return 1
+        if isinstance(exc, TransportError):
+            return 3
         return 1
 
     if not isinstance(pong, dict) or not pong.get("pong"):
