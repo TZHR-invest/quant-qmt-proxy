@@ -159,6 +159,16 @@ class XTTraderGateway:
             self.trader.set_timeout(10)
         except Exception:
             pass
+        # 2026-10-27 (事故 §75.9): PYTHONPATH 一丢，bigqmt shim 就不加载，这里会**静默**
+        # 回落成原生 xtquant.xttrader（连 userdata_mini 的 58610，被别的账户客户端接走
+        # ⇒ connect() 恒 -1，而桥仍 READY）。实测：NSSM 环境块里把某个变量置空（VAR=）
+        # 会让 PYTHONPATH 从进程环境里消失。只在这种情况告警，正常时不刷日志。
+        import os as _os
+        if _os.environ.get('PYTHONPATH') is None:
+            logger.warning(
+                "★ PYTHONPATH 丢失 → bigqmt shim 未加载，xttrader 将回落成原生实现（必然连不上）。"
+                " 查 NSSM AppEnvironmentExtra，确认没有把任何变量置空（2026-10-27 事故）"
+            )
         logger.info(
             f"xttrader connecting: account_id={self.account_id}, account_type={self.account_type}, session={self.session}"
         )
