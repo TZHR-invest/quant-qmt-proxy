@@ -496,6 +496,7 @@ class TradingSessionManager:
         not "ready"."""
         with self._lock:
             sessions = list(self._sessions.values())
+            breaker = {aid: dict(st or {}) for aid, st in self._breaker.items()}
         real = [s for s in sessions if s.mode != XTQuantMode.MOCK.value]
         connected = [s for s in real if getattr(s.gateway, "connected", False)]
         # D6 (2026-09-15): which trader is actually wired up (bridge vs mini).
@@ -513,6 +514,16 @@ class TradingSessionManager:
             "sessions_real": len(real),
             "sessions_connected": len(connected),
             "backend": backend,
+            # 2026-10-27: a dead xttrader used to be INDISTINGUISHABLE from a
+            # normal idle (POST /sessions 503 -> no session -> status "idle"),
+            # which is why this outage was invisible on every health probe.
+            "circuit_open": sorted(
+                aid for aid, st in breaker.items()
+                if float(st.get("open_until") or 0) > __import__("time").time()
+            ),
+            "breaker_failures": {
+                aid: int(st.get("failures") or 0) for aid, st in breaker.items()
+            },
         }
 
     def _connect_gateway(self, account_id: str, account_type: str, session_id: str) -> XTTraderGateway:
