@@ -52,7 +52,9 @@ def _bridge_board_gate(normalized_code: str, side=None):
         return None
     code = str(normalized_code or "").strip().upper()
     digits, _, market = code.partition(".")
-    if market == "BJ":
+    if market == "BJ" and any(
+        _p in _BRIDGE_DENY_CODE_PREFIXES for _p in ("43", "83", "87", "88", "92")
+    ):
         return "board not allowed for this account: %s (BSE)" % code
     for prefix in _BRIDGE_DENY_CODE_PREFIXES:
         if digits.startswith(prefix):
