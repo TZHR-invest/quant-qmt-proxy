@@ -85,7 +85,7 @@ if (-not (Test-Path -LiteralPath $launcher)) { Say "ERROR: launcher not found: $
 
 $legs = @(
     @{ Name = '666';  QmtDir = 'G:\qmt1'; Service = 'QMTProxy-666';  AccountId = '666810082889' },
-    @{ Name = '020';  QmtDir = 'G:\qmt';  Service = 'QMTProxy-020';  AccountId = '020100053835' },
+    # 2026-10-30: 020 已注销（清仓完成、QMTProxy-020 已停）=> 该腿移除
     @{ Name = '2986'; QmtDir = 'G:\qmt2'; Service = 'QMTProxy-2986'; AccountId = '666656292986' }
 )
 
@@ -151,7 +151,7 @@ if ($AllowServiceStop) {
 
 Say ''
 Say '--- service state after the boot (REPORT ONLY, we do not start them) ---'
-foreach ($s in @('QMTProxy-666', 'QMTProxy-020', 'QMTProxy-2986')) {
+foreach ($s in @('QMTProxy-666', 'QMTProxy-2986')) {   # 2026-10-30: 020 已移除
     $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
     Say ("  " + $s + " = " + $(if ($svc) { $svc.Status } else { 'MISSING' }))
 }

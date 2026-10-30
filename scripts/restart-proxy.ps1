@@ -93,7 +93,7 @@ function Get-Backend([string]$service) {
 }
 
 $qmtChecks = @(
-    @{ Label = "020 (G:\qmt)";   Service = "QMTProxy-020";  Path = "G:\qmt\userdata_mini";  Account = "020100053835"; Exe = "G:\qmt\bin.x64\XtMiniQmt.exe" },
+    # 2026-10-30: 020 已注销（清仓完成、QMTProxy-020 已停）=> 从服务表移除
     @{ Label = "666 (G:\qmt1)";  Service = "QMTProxy-666";  Path = "G:\qmt1\userdata_mini"; Account = "666810082889"; Exe = "G:\qmt1\bin.x64\XtMiniQmt.exe" },
     @{ Label = "2986 (G:\qmt2)"; Service = "QMTProxy-2986"; Path = "G:\qmt2\userdata_mini"; Account = "666656292986"; Exe = "G:\qmt2\bin.x64\XtMiniQmt.exe" }
 )
@@ -163,7 +163,7 @@ Write-Log "all channels ready, restarting proxy services..."
 # 代理由 NSSM 服务 QMTProxy-020 / QMTProxy-666 / QMTProxy-2986 托管，必须通过服务控制停止，
 # 否则 nssm 会立即拉起被杀掉的进程，与手动启动产生双实例/端口冲突。
 Write-Log "Stopping proxy services..."
-foreach ($svc in @("QMTProxy-020", "QMTProxy-666", "QMTProxy-2986")) {
+foreach ($svc in @("QMTProxy-666", "QMTProxy-2986")) {   # 2026-10-30: 020 已移除
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
     if ($s -and $s.Status -ne "Stopped") {
         Write-Log "Stopping service $svc..."
@@ -212,7 +212,7 @@ Start-Sleep -Seconds 2
 
 # --- Step 2: Start proxy services (NSSM managed) ---
 Write-Log "Starting proxy services..."
-foreach ($svc in @("QMTProxy-020", "QMTProxy-666", "QMTProxy-2986")) {
+foreach ($svc in @("QMTProxy-666", "QMTProxy-2986")) {   # 2026-10-30: 020 已移除
     $out = & sc.exe start $svc 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0) {
         Write-Log "Started $svc"
@@ -224,7 +224,7 @@ foreach ($svc in @("QMTProxy-020", "QMTProxy-666", "QMTProxy-2986")) {
 # --- Step 3: Wait for services to bind ports ---
 Start-Sleep -Seconds 8
 
-$ports = @(8001, 8002, 8003, 50051, 50052, 50053)
+$ports = @(8002, 8003, 50052, 50053)   # 2026-10-30: 8001/50051(020) 已移除
 $listening = netstat -ano | Select-String "LISTENING"
 foreach ($port in $ports) {
     $found = $listening | Select-String ":$port "
